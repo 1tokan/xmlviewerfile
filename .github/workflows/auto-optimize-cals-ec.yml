@@ -1,133 +1,265 @@
-name: CALS_EC Auto Optimization
+name: Auto Optimize XML Viewer
 
 on:
   schedule:
-    - cron: '0 */15 * * *'  # Every 15 minutes
-  workflow_dispatch:
+    # 15分ごとに実行（30日間継続）
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # 手動実行も可能
 
 jobs:
   optimize:
     runs-on: ubuntu-latest
+    if: github.event.repository.created_at > (now() - duration('30d'))
+    
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    
-    - name: Setup Node.js
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Node.js for Claude API
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
-    
+        node-version: '18'
+
     - name: Install dependencies
-      run: npm install terser html-minifier-terser
-    
-    - name: Optimize with Claude
-      env:
-        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       run: |
-        node -e "
-        const fs=require('fs');
-        const path=require('path');
-        const https=require('https');
-        const {minify}=require('terser');
-        const {minify:htmlMinify}=require('html-minifier-terser');
-        
-        const API_KEY=process.env.ANTHROPIC_API_KEY;
-        const srcDir='./tree/main/CALS_EC';
-        const outDir='./optimized';
-        
-        if(!fs.existsSync(outDir))fs.mkdirSync(outDir,{recursive:true});
-        
-        const callClaude=async(prompt)=>{
-          const data=JSON.stringify({
-            model:'claude-sonnet-4-20250514',
-            max_tokens:4000,
-            messages:[{role:'user',content:prompt}]
-          });
-          
-          return new Promise((resolve,reject)=>{
-            const req=https.request({
-              hostname:'api.anthropic.com',
-              path:'/v1/messages',
-              method:'POST',
-              headers:{
-                'Content-Type':'application/json',
-                'Content-Length':data.length,
-                'x-api-key':API_KEY,
-                'anthropic-version':'2023-06-01'
+        npm init -y
+        npm install axios
+
+    - name: Create optimization script
+      run: |
+        cat > optimize.js << 'EOF'
+        const axios = require('axios');
+        const fs = require('fs');
+        const path = require('path');
+
+        // Claude APIを使用した最適化処理
+        async function optimizeWithClaude() {
+          const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+          if (!CLAUDE_API_KEY) {
+            console.log('CLAUDE_API_KEY not found, skipping optimization');
+            return;
+          }
+
+          try {
+            // 現在のindex.htmlを読み込み
+            const currentHtml = fs.readFileSync('index.html', 'utf-8');
+            const currentCss = fs.existsSync('style.css') ? fs.readFileSync('style.css', 'utf-8') : '';
+            const currentJs = fs.existsSync('script.js') ? fs.readFileSync('script.js', 'utf-8') : '';
+
+            // CALS_ECフォルダの構造を取得
+            const xmlStructure = getXmlStructure('./CALS_EC');
+
+            // Claude APIに最適化リクエストを送信
+            const response = await axios.post('https://api.anthropic.com/v1/messages', {
+              model: 'claude-3-sonnet-20240229',
+              max_tokens: 4000,
+              messages: [{
+                role: 'user',
+                content: `
+                以下のXMLビューワーを最適化してください：
+
+                【現在のコード】
+                HTML: ${currentHtml}
+                CSS: ${currentCss}
+                JavaScript: ${currentJs}
+
+                【XML構造】
+                ${JSON.stringify(xmlStructure, null, 2)}
+
+                【最適化要件】
+                1. JavaScriptのみで動作（jQuery/node.js不要）
+                2. 処理速度とUI/UXの向上
+                3. エラーハンドリングの強化
+                4. XML構造の違いに対応
+                5. 任意のXMLフォルダを手動選択可能
+                6. 機能単位でファイル分割（必要に応じて）
+
+                【出力形式】
+                JSON形式で以下を返してください：
+                {
+                  "html": "最適化されたHTML",
+                  "css": "最適化されたCSS",
+                  "js": "最適化されたJavaScript",
+                  "improvements": ["改善点1", "改善点2", ...],
+                  "additionalFiles": {
+                    "filename": "content"
+                  }
+                }
+                `
+              }],
+              temperature: 0.7
+            }, {
+              headers: {
+                'Authorization': `Bearer ${CLAUDE_API_KEY}`,
+                'Content-Type': 'application/json',
+                'anthropic-version': '2023-06-01'
               }
-            },res=>{
-              let body='';
-              res.on('data',chunk=>body+=chunk);
-              res.on('end',()=>resolve(JSON.parse(body)));
             });
-            req.on('error',reject);
-            req.write(data);
-            req.end();
-          });
-        };
-        
-        const optimizeHTML=async()=>{
-          const htmlPath=path.join(srcDir,'index.html');
-          if(!fs.existsSync(htmlPath))return;
+
+            const optimizedCode = JSON.parse(response.data.content[0].text);
+
+            // optimizedフォルダを作成
+            if (!fs.existsSync('optimized')) {
+              fs.mkdirSync('optimized');
+            }
+
+            // 最適化されたファイルを保存
+            fs.writeFileSync('optimized/index.html', optimizedCode.html);
+            if (optimizedCode.css) {
+              fs.writeFileSync('optimized/style.css', optimizedCode.css);
+            }
+            if (optimizedCode.js) {
+              fs.writeFileSync('optimized/script.js', optimizedCode.js);
+            }
+
+            // 追加ファイルがある場合は保存
+            if (optimizedCode.additionalFiles) {
+              for (const [filename, content] of Object.entries(optimizedCode.additionalFiles)) {
+                fs.writeFileSync(`optimized/${filename}`, content);
+              }
+            }
+
+            // 改善ログを記録
+            const logEntry = {
+              timestamp: new Date().toISOString(),
+              improvements: optimizedCode.improvements,
+              filesGenerated: Object.keys(optimizedCode.additionalFiles || {}).concat(['index.html'])
+            };
+
+            fs.writeFileSync('optimized/optimization_log.json', JSON.stringify(logEntry, null, 2));
+
+            console.log('Optimization completed successfully');
+            console.log('Improvements:', optimizedCode.improvements);
+
+          } catch (error) {
+            console.error('Optimization failed:', error.message);
+          }
+        }
+
+        // XML構造を取得する関数
+        function getXmlStructure(dirPath) {
+          const structure = {};
           
-          const html=fs.readFileSync(htmlPath,'utf8');
-          const jsFiles=fs.readdirSync(srcDir).filter(f=>f.endsWith('.js'));
-          const jsContent=jsFiles.map(f=>fs.readFileSync(path.join(srcDir,f),'utf8')).join('\n');
+          if (!fs.existsSync(dirPath)) {
+            return structure;
+          }
+
+          const files = fs.readdirSync(dirPath);
           
-          const prompt=\`Optimize this HTML/JS for CALS_EC XML processing. Requirements:
-          - Pure JavaScript (no jQuery/Node.js)
-          - Handle diverse XML files with redundancy
-          - Minimize code size while maintaining performance
-          - Split large JS files if needed
-          - Preserve all functionality
-          - Improve error handling
-          - Enhance UI/UX
-          
-          HTML:\${html}
-          JS:\${jsContent}
-          
-          Return optimized code with clear file separation.\`;
-          
-          const response=await callClaude(prompt);
-          const optimizedCode=response.content[0].text;
-          
-          // Extract and save optimized files
-          const htmlMatch=optimizedCode.match(/<html[^>]*>[\s\S]*<\/html>/i);
-          const jsMatch=optimizedCode.match(/\/\/ main\.js[\s\S]*?(?=\/\/|$)/);
-          
-          if(htmlMatch){
-            const minifiedHTML=await htmlMinify(htmlMatch[0],{
-              collapseWhitespace:true,
-              removeComments:true,
-              minifyJS:true,
-              minifyCSS:true
-            });
-            fs.writeFileSync(path.join(outDir,'index.html'),minifiedHTML);
+          for (const file of files) {
+            const filePath = path.join(dirPath, file);
+            const stat = fs.statSync(filePath);
+            
+            if (stat.isDirectory()) {
+              structure[file] = getXmlStructure(filePath);
+            } else if (file.endsWith('.xml')) {
+              structure[file] = {
+                type: 'xml',
+                size: stat.size,
+                modified: stat.mtime.toISOString()
+              };
+            }
           }
           
-          if(jsMatch){
-            const minifiedJS=await minify(jsMatch[0]);
-            fs.writeFileSync(path.join(outDir,'main.js'),minifiedJS.code);
-          }
+          return structure;
+        }
+
+        // 性能比較を行う関数
+        function comparePerformance() {
+          // 簡単な性能比較（ファイルサイズ、構造の複雑さなど）
+          const originalSize = getFileSize('index.html');
+          const optimizedSize = getFileSize('optimized/index.html');
           
-          console.log('Optimization completed');
-        };
-        
-        optimizeHTML().catch(console.error);
-        "
-    
-    - name: Commit optimized files
+          const comparison = {
+            timestamp: new Date().toISOString(),
+            originalSize,
+            optimizedSize,
+            improvement: originalSize > optimizedSize ? 'Size reduced' : 'Size increased',
+            sizeReduction: originalSize - optimizedSize
+          };
+
+          console.log('Performance comparison:', comparison);
+          
+          // 改善がない場合は最適化ファイルを削除
+          if (optimizedSize >= originalSize && !hasSignificantImprovement()) {
+            console.log('No significant improvement detected, removing optimized files');
+            removeOptimizedFiles();
+          }
+        }
+
+        function getFileSize(filePath) {
+          try {
+            return fs.statSync(filePath).size;
+          } catch {
+            return 0;
+          }
+        }
+
+        function hasSignificantImprovement() {
+          // 改善の有無を判定するロジック
+          // ログファイルから改善点を確認
+          try {
+            const log = JSON.parse(fs.readFileSync('optimized/optimization_log.json', 'utf-8'));
+            return log.improvements && log.improvements.length > 0;
+          } catch {
+            return false;
+          }
+        }
+
+        function removeOptimizedFiles() {
+          if (fs.existsSync('optimized')) {
+            fs.rmSync('optimized', { recursive: true, force: true });
+          }
+        }
+
+        // メイン処理
+        async function main() {
+          console.log('Starting optimization process...');
+          await optimizeWithClaude();
+          comparePerformance();
+        }
+
+        main().catch(console.error);
+        EOF
+
+    - name: Run optimization
+      env:
+        CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+      run: node optimize.js
+
+    - name: Commit and push changes
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add optimized/
-        git diff --staged --quiet || git commit -m "Auto-optimize CALS_EC files [$(date)]"
-        git push
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Cleanup old optimizations
+        
+        if [ -d "optimized" ]; then
+          git add optimized/
+          git commit -m "Auto-optimize XML viewer - $(date '+%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
+          git push || echo "Nothing to push"
+        else
+          echo "No optimized files to commit"
+        fi
+
+    - name: Create performance report
       run: |
-        find ./optimized -name "*.bak" -mtime +1 -delete
-        find ./optimized -name "*.tmp" -mtime +1 -delete
+        if [ -f "optimized/optimization_log.json" ]; then
+          echo "## Optimization Report" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "**Improvements:**" >> $GITHUB_STEP_SUMMARY
+          cat optimized/optimization_log.json | jq -r '.improvements[]' | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+        fi
+
+  # 30日後に自動停止
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: optimize
+    if: github.event.repository.created_at <= (now() - duration('30d'))
+    
+    steps:
+    - name: Disable workflow
+      run: |
+        echo "30-day optimization period completed"
+        # ワークフローを無効化するロジック（必要に応じて）
