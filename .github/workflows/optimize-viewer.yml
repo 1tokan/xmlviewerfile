@@ -2,7 +2,7 @@ name: Optimize Viewer Sync
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # 15分ごとに実行（UTC基準）
+    - cron: '*/15 * * * *'  # 15分ごと
   push:
     paths:
       - 'optimized/**'
@@ -18,14 +18,18 @@ jobs:
 
       - name: Sync optimized files to root
         run: |
-          cp optimized/index.html ./index.html || echo "No index.html"
-          cp optimized/script.js ./script.js || echo "No script.js"
-          cp optimized/style.css ./style.css || echo "No style.css"
+          for file in index.html script.js style.css; do
+            if [ -f "optimized/$file" ]; then
+              cp "optimized/$file" "./$file"
+              git add "$file"
+            else
+              echo "Skipping $file (not found)"
+            fi
+          done
 
       - name: Commit and Push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html script.js style.css
           git commit -m "Automated viewer optimization sync (every 15min)" || echo "No changes"
           git push
