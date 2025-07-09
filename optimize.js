@@ -1,357 +1,336 @@
+const axios = require('axios');
 const fs = require('fs-extra');
 const path = require('path');
-const axios = require('axios');
+const cheerio = require('cheerio');
 
-class XMLViewerOptimizer {
+class ClaudeOptimizer {
   constructor() {
     this.apiKey = process.env.ANTHROPIC_API_KEY;
-    this.state = this.loadState();
     this.baseUrl = 'https://api.anthropic.com/v1/messages';
-    this.maxTokens = 4096;
+    this.maxRetries = 3;
+    this.retryDelay = 2000;
   }
-
-  loadState() {
-    try {
-      return JSON.parse(fs.readFileSync('optimization_state.json', 'utf8'));
-    } catch (error) {
-      return {
-        current_step: 'init',
-        iteration: 0,
-        last_run: '',
-        files_processed: [],
-        performance_metrics: {}
-      };
-    }
-  }
-
-  saveState() {
-    fs.writeFileSync('optimization_state.json', JSON.stringify(this.state, null, 2));
-  }
-
-  async callClaude(prompt) {
-    try {
-      const response = await axios.post(this.baseUrl, {
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: this.maxTokens,
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ]
-      }, {
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01'
-        }
-      });
-
-      return response.data.content[0].text;
-    } catch (error) {
-      console.error('Claude API Error:', error.response?.data || error.message);
-      throw error;
-    }
-  }
-
-  async readSourceFiles() {
-    const files = {};
-    const sourceFolder = path.join(process.env.TARGET_FOLDER);
+  
+  async callClaude(prompt, maxTokens = 4000) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-api-key': this.apiKey,
+      'anthropic-version': '2023-06-01'
+    };
     
-    try {
-      // 基本ファイル読み込み
-      const indexPath = path.join(sourceFolder, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        files.html = fs.readFileSync(indexPath, 'utf8');
-      }
-
-      // CSS/JSファイル検索
-      const cssFiles = this.findFiles(sourceFolder, '.css');
-      const jsFiles = this.findFiles(sourceFolder, '.js');
-      
-      files.css = {};
-      files.js = {};
-
-      for (const cssFile of cssFiles) {
-        const relativePath = path.relative(sourceFolder, cssFile);
-        files.css[relativePath] = fs.readFileSync(cssFile, 'utf8');
-      }
-
-      for (const jsFile of jsFiles) {
-        const relativePath = path.relative(sourceFolder, jsFile);
-        files.js[relativePath] = fs.readFileSync(jsFile, 'utf8');
-      }
-
-      return files;
-    } catch (error) {
-      console.error('Error reading source files:', error);
-      return {};
-    }
-  }
-
-  findFiles(dir, extension) {
-    const files = [];
-    if (!fs.existsSync(dir)) return files;
-
-    const items = fs.readdirSync(dir);
-    for (const item of items) {
-      const fullPath = path.join(dir, item);
-      if (fs.statSync(fullPath).isDirectory()) {
-        files.push(...this.findFiles(fullPath, extension));
-      } else if (item.endsWith(extension)) {
-        files.push(fullPath);
+    const data = {
+      model: 'claude-3-sonnet-20240229',
+      max_tokens: maxTokens,
+      messages: [{
+        role: 'user',
+        content: prompt
+      }]
+    };
+    
+    for (let i = 0; i < this.maxRetries; i++) {
+      try {
+        const response = await axios.post(this.baseUrl, data, { headers });
+        return response.data.content[0].text;
+      } catch (error) {
+        console.error(`API call failed (attempt ${i + 1}):`, error.message);
+        if (i === this.maxRetries - 1) throw error;
+        await this.delay(this.retryDelay * (i + 1));
       }
     }
-    return files;
   }
-
-  async optimizeHTML(htmlContent) {
+  
+  delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  async optimizeHTML(content, cssFiles, jsFiles) {
     const prompt = `
-    以下のXMLビューワのHTMLを最適化してください。
-
-    要件:
-    1. CALS_ECフォルダ以外も選択可能な設計
-    2. 最適化されたCSS/JSファイルを/optimized/から読み込み
-    3. 可読性と保守性を保持
-    4. エラーハンドリングの強化
-
-    HTML内容:
-    ${htmlContent}
-
-    最適化されたHTMLのみを出力してください。
+    XMLビューワのindex.htmlを最適化してください。以下の要件を満たしてください：
+    
+    【現在のHTML】
+    ${content}
+    
+    【利用可能なCSS】
+    ${cssFiles.map(f => `- ${f}`).join('\n')}
+    
+    【利用可能なJS】
+    ${jsFiles.map(f => `- ${f}`).join('\n')}
+    
+    【最適化要件】
+    1. CSS/JSファイルを適切に読み込む
+    2. CALS_EC以外のフォルダも選択可能にする
+    3. XMLエラーハンドリングを強化
+    4. UI/UXを改善
+    5. 速度とパフォーマンスを向上
+    
+    最適化されたHTMLのみを出力してください。説明は不要です。
     `;
-
+    
     return await this.callClaude(prompt);
   }
-
-  async optimizeCSS(cssFiles) {
+  
+  async optimizeCSS(content, filename) {
     const prompt = `
-    以下のCSSファイルを最適化してください。
-
-    要件:
-    1. 肥大化時は機能単位で分割（例: layout.css, components.css, utilities.css）
-    2. 重複するスタイルを統合
-    3. 未使用セレクタを削除
-    4. 可読性を保持
-    5. ファイル名はkebab-case
-
-    CSS内容:
-    ${JSON.stringify(cssFiles, null, 2)}
-
-    最適化結果を以下のJSON形式で出力してください:
-    {
-      "files": {
-        "ファイル名": "CSS内容",
-        ...
-      },
-      "optimization_notes": "最適化内容の説明"
-    }
+    以下のCSSファイル「${filename}」を最適化してください：
+    
+    ${content}
+    
+    【最適化要件】
+    1. 冗長なスタイルを削除
+    2. セレクタを最適化
+    3. メディアクエリを統合
+    4. 変数化可能な値は統一
+    5. 読み込み速度を向上
+    6. 保守性を向上
+    
+    最適化されたCSSのみを出力してください。説明は不要です。
     `;
-
-    const response = await this.callClaude(prompt);
-    try {
-      return JSON.parse(response);
-    } catch (error) {
-      console.error('CSS optimization response parsing error:', error);
-      return { files: cssFiles, optimization_notes: 'Failed to parse optimization result' };
-    }
+    
+    return await this.callClaude(prompt);
   }
-
-  async optimizeJS(jsFiles) {
+  
+  async optimizeJS(content, filename) {
     const prompt = `
-    以下のJavaScriptファイルを最適化してください。
-
-    要件:
-    1. 肥大化時は機能単位で分割（例: xmlParser.js, domRenderer.js, fileLoader.js）
-    2. 重複コードを削除
-    3. 未使用関数を削除
-    4. エラーハンドリング強化
-    5. XMLエラー対策（未定義タグ、文字化け、DTD不一致）
-    6. ファイル名はkebab-case/camelCase
-    7. 意味のある名前を使用
-
-    JavaScript内容:
-    ${JSON.stringify(jsFiles, null, 2)}
-
-    最適化結果を以下のJSON形式で出力してください:
-    {
-      "files": {
-        "ファイル名": "JavaScript内容",
-        ...
-      },
-      "optimization_notes": "最適化内容の説明"
-    }
+    以下のJavaScriptファイル「${filename}」を最適化してください：
+    
+    ${content}
+    
+    【最適化要件】
+    1. 冗長なコードを削除
+    2. 未使用関数を削除
+    3. エラーハンドリングを強化
+    4. XMLパース処理を最適化
+    5. DOM操作を効率化
+    6. 機能が肥大化している場合は分割提案
+    
+    最適化されたJavaScriptのみを出力してください。
+    分割が必要な場合は「SPLIT_REQUIRED: filename1.js, filename2.js」で開始してください。
     `;
-
-    const response = await this.callClaude(prompt);
-    try {
-      return JSON.parse(response);
-    } catch (error) {
-      console.error('JS optimization response parsing error:', error);
-      return { files: jsFiles, optimization_notes: 'Failed to parse optimization result' };
-    }
+    
+    return await this.callClaude(prompt);
   }
-
-  async performQualityCheck(originalFiles, optimizedFiles) {
+  
+  async splitJavaScript(content, filename) {
     const prompt = `
-    XMLビューワの最適化結果を評価してください。
-
-    元のファイル:
-    ${JSON.stringify(originalFiles, null, 2)}
-
-    最適化結果:
-    ${JSON.stringify(optimizedFiles, null, 2)}
-
-    評価項目:
-    1. UI/UX体験
-    2. 速度・パフォーマンス
-    3. 機能完全性
-    4. 可読性・保守性
-    5. エラーハンドリング
-
-    以下のJSON形式で評価結果を出力してください:
-    {
-      "quality_score": 0-100,
-      "improvements": ["改善点1", "改善点2"],
-      "issues": ["問題点1", "問題点2"],
-      "recommendation": "keep" | "rollback" | "improve",
-      "metrics": {
-        "code_reduction": "コード削減率%",
-        "file_count": "ファイル数変化",
-        "estimated_performance": "パフォーマンス評価"
-      }
-    }
+    以下のJavaScriptファイル「${filename}」を機能単位で分割してください：
+    
+    ${content}
+    
+    【分割要件】
+    1. 意味のある機能単位で分割
+    2. ファイル名はkebab-caseまたはcamelCaseで機能を表現
+    3. 依存関係を考慮した分割
+    4. 例: xmlParser.js, domRenderer.js, fileLoader.js, errorHandler.js
+    
+    出力形式：
+    // === filename1.js ===
+    [コード]
+    // === filename2.js ===
+    [コード]
     `;
-
-    const response = await this.callClaude(prompt);
-    try {
-      return JSON.parse(response);
-    } catch (error) {
-      console.error('Quality check response parsing error:', error);
-      return {
-        quality_score: 50,
-        recommendation: 'improve',
-        metrics: {}
-      };
-    }
+    
+    return await this.callClaude(prompt, 8000);
   }
-
-  async run() {
-    const startTime = Date.now();
-    console.log('Starting XML Viewer optimization...');
-
-    try {
-      // 1. ソースファイル読み込み
-      const sourceFiles = await this.readSourceFiles();
-      if (!sourceFiles.html) {
-        throw new Error('index.html not found');
-      }
-
-      // 2. HTML最適化
-      console.log('Optimizing HTML...');
-      const optimizedHTML = await this.optimizeHTML(sourceFiles.html);
-
-      // 3. CSS最適化
-      console.log('Optimizing CSS...');
-      const optimizedCSS = await this.optimizeCSS(sourceFiles.css);
-
-      // 4. JavaScript最適化
-      console.log('Optimizing JavaScript...');
-      const optimizedJS = await this.optimizeJS(sourceFiles.js);
-
-      // 5. 品質チェック
-      console.log('Performing quality check...');
-      const qualityResult = await this.performQualityCheck(
-        sourceFiles,
-        {
-          html: optimizedHTML,
-          css: optimizedCSS.files,
-          js: optimizedJS.files
-        }
-      );
-
-      // 6. 結果保存
-      if (qualityResult.recommendation === 'keep') {
-        await this.saveOptimizedFiles(optimizedHTML, optimizedCSS.files, optimizedJS.files);
-        console.log('Optimization completed and saved');
-      } else if (qualityResult.recommendation === 'rollback') {
-        console.log('Optimization rolled back due to quality issues');
-        await this.cleanup();
-      } else {
-        console.log('Optimization needs improvement, will retry next iteration');
-      }
-
-      // 7. ログ記録
-      await this.logResults(qualityResult, Date.now() - startTime);
-
-      this.state.iteration++;
-      this.state.last_run = new Date().toISOString();
-      this.saveState();
-
-    } catch (error) {
-      console.error('Optimization failed:', error);
-      await this.logError(error);
-    }
-  }
-
-  async saveOptimizedFiles(html, cssFiles, jsFiles) {
-    const outputDir = process.env.OUTPUT_FOLDER;
-    await fs.ensureDir(outputDir);
-
-    // HTML保存
-    await fs.writeFile(path.join(outputDir, 'index.html'), html);
-
-    // CSS保存
-    for (const [filename, content] of Object.entries(cssFiles)) {
-      await fs.writeFile(path.join(outputDir, filename), content);
-    }
-
-    // JS保存
-    for (const [filename, content] of Object.entries(jsFiles)) {
-      await fs.writeFile(path.join(outputDir, filename), content);
-    }
-  }
-
-  async cleanup() {
-    const outputDir = process.env.OUTPUT_FOLDER;
-    if (fs.existsSync(outputDir)) {
-      await fs.remove(outputDir);
-    }
-  }
-
-  async logResults(qualityResult, processingTime) {
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      iteration: this.state.iteration,
-      processing_time: processingTime,
-      quality_score: qualityResult.quality_score,
-      recommendation: qualityResult.recommendation,
-      metrics: qualityResult.metrics,
-      improvements: qualityResult.improvements,
-      issues: qualityResult.issues
-    };
-
-    await fs.appendFile(
-      'logs/optimization_log.json',
-      JSON.stringify(logEntry) + '\n'
-    );
-  }
-
-  async logError(error) {
-    const errorEntry = {
-      timestamp: new Date().toISOString(),
-      iteration: this.state.iteration,
-      error: error.message,
-      stack: error.stack
-    };
-
-    await fs.appendFile(
-      'logs/error_log.json',
-      JSON.stringify(errorEntry) + '\n'
-    );
+  
+  async analyzeAndCompare(originalPath, optimizedPath) {
+    const prompt = `
+    XMLビューワの最適化結果を比較評価してください：
+    
+    【評価観点】
+    1. UI/UX: 使いやすさ、見た目の改善
+    2. 速度: 読み込み速度、実行速度
+    3. 安定性: エラーハンドリング、堅牢性
+    4. 可読性: コードの理解しやすさ
+    5. 機能再現性: 元の機能が正しく動作するか
+    
+    【判定】
+    ACCEPT: 最適化を採用
+    REJECT: 最適化を却下
+    PARTIAL: 部分的に採用
+    
+    判定結果のみを最初の行に出力してください。
+    `;
+    
+    return await this.callClaude(prompt);
   }
 }
 
-// 実行
-const optimizer = new XMLViewerOptimizer();
-optimizer.run().catch(console.error);
+class FileManager {
+  constructor() {
+    this.targetFolder = process.env.TARGET_FOLDER || 'main/CALS_EC/';
+    this.outputFolder = process.env.OUTPUT_FOLDER || 'optimized/';
+    this.viewerFile = process.env.VIEWER_FILE || 'index.html';
+  }
+  
+  async ensureDirectories() {
+    await fs.ensureDir(this.outputFolder);
+    await fs.ensureDir(path.join(this.outputFolder, 'css'));
+    await fs.ensureDir(path.join(this.outputFolder, 'js'));
+  }
+  
+  async readFile(filePath) {
+    try {
+      return await fs.readFile(filePath, 'utf-8');
+    } catch (error) {
+      console.error(`Error reading file ${filePath}:`, error.message);
+      return null;
+    }
+  }
+  
+  async writeFile(filePath, content) {
+    try {
+      await fs.writeFile(filePath, content, 'utf-8');
+      return true;
+    } catch (error) {
+      console.error(`Error writing file ${filePath}:`, error.message);
+      return false;
+    }
+  }
+  
+  async getFileList(dir, extension) {
+    try {
+      const files = await fs.readdir(dir);
+      return files.filter(file => file.endsWith(extension));
+    } catch (error) {
+      return [];
+    }
+  }
+  
+  async getFileSize(filePath) {
+    try {
+      const stats = await fs.stat(filePath);
+      return stats.size;
+    } catch (error) {
+      return 0;
+    }
+  }
+}
+
+class OptimizationLogger {
+  constructor() {
+    this.logFile = 'optimization.log';
+    this.startTime = Date.now();
+  }
+  
+  async log(message) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] ${message}\n`;
+    await fs.appendFile(this.logFile, logEntry);
+    console.log(message);
+  }
+  
+  async logOptimization(filename, originalSize, optimizedSize, processingTime) {
+    const reductionRate = ((originalSize - optimizedSize) / originalSize * 100).toFixed(2);
+    const message = `Optimized ${filename}: ${originalSize}B → ${optimizedSize}B (${reductionRate}% reduction) in ${processingTime}ms`;
+    await this.log(message);
+  }
+  
+  async logSummary(totalFiles, totalReduction, totalTime) {
+    const message = `Summary: ${totalFiles} files optimized, ${totalReduction}B total reduction in ${totalTime}ms`;
+    await this.log(message);
+  }
+}
+
+async function main() {
+  const optimizer = new ClaudeOptimizer();
+  const fileManager = new FileManager();
+  const logger = new OptimizationLogger();
+  
+  await logger.log('Starting XML Viewer optimization process...');
+  
+  try {
+    await fileManager.ensureDirectories();
+    
+    // HTMLファイルの最適化
+    const htmlPath = path.join(fileManager.targetFolder, fileManager.viewerFile);
+    const htmlContent = await fileManager.readFile(htmlPath);
+    
+    if (!htmlContent) {
+      await logger.log('HTML file not found, skipping optimization');
+      return;
+    }
+    
+    // CSSファイルの取得と最適化
+    const cssFiles = await fileManager.getFileList(fileManager.targetFolder, '.css');
+    const optimizedCssFiles = [];
+    
+    for (const cssFile of cssFiles) {
+      const startTime = Date.now();
+      const cssPath = path.join(fileManager.targetFolder, cssFile);
+      const cssContent = await fileManager.readFile(cssPath);
+      
+      if (cssContent) {
+        const originalSize = await fileManager.getFileSize(cssPath);
+        const optimizedCSS = await optimizer.optimizeCSS(cssContent, cssFile);
+        const outputPath = path.join(fileManager.outputFolder, 'css', cssFile);
+        
+        await fileManager.writeFile(outputPath, optimizedCSS);
+        const optimizedSize = await fileManager.getFileSize(outputPath);
+        const processingTime = Date.now() - startTime;
+        
+        await logger.logOptimization(cssFile, originalSize, optimizedSize, processingTime);
+        optimizedCssFiles.push(`css/${cssFile}`);
+      }
+    }
+    
+    // JavaScriptファイルの最適化
+    const jsFiles = await fileManager.getFileList(fileManager.targetFolder, '.js');
+    const optimizedJsFiles = [];
+    
+    for (const jsFile of jsFiles) {
+      const startTime = Date.now();
+      const jsPath = path.join(fileManager.targetFolder, jsFile);
+      const jsContent = await fileManager.readFile(jsPath);
+      
+      if (jsContent) {
+        const originalSize = await fileManager.getFileSize(jsPath);
+        const optimizedJS = await optimizer.optimizeJS(jsContent, jsFile);
+        
+        // 分割が必要かチェック
+        if (optimizedJS.startsWith('SPLIT_REQUIRED:')) {
+          const splitResult = await optimizer.splitJavaScript(jsContent, jsFile);
+          const splitFiles = splitResult.split('// === ').filter(part => part.trim());
+          
+          for (const splitFile of splitFiles) {
+            const lines = splitFile.split('\n');
+            const filename = lines[0].replace(' ===', '');
+            const code = lines.slice(1).join('\n');
+            
+            const outputPath = path.join(fileManager.outputFolder, 'js', filename);
+            await fileManager.writeFile(outputPath, code);
+            optimizedJsFiles.push(`js/${filename}`);
+          }
+        } else {
+          const outputPath = path.join(fileManager.outputFolder, 'js', jsFile);
+          await fileManager.writeFile(outputPath, optimizedJS);
+          optimizedJsFiles.push(`js/${jsFile}`);
+        }
+        
+        const processingTime = Date.now() - startTime;
+        await logger.logOptimization(jsFile, originalSize, 0, processingTime);
+      }
+    }
+    
+    // HTMLファイルの最適化と統合
+    const optimizedHTML = await optimizer.optimizeHTML(htmlContent, optimizedCssFiles, optimizedJsFiles);
+    const optimizedHtmlPath = path.join(fileManager.outputFolder, fileManager.viewerFile);
+    await fileManager.writeFile(optimizedHtmlPath, optimizedHTML);
+    
+    // 比較評価
+    const evaluation = await optimizer.analyzeAndCompare(htmlPath, optimizedHtmlPath);
+    await logger.log(`Evaluation result: ${evaluation}`);
+    
+    if (evaluation.startsWith('REJECT')) {
+      await logger.log('Optimization rejected, removing optimized files');
+      await fs.remove(fileManager.outputFolder);
+    } else {
+      await logger.log('Optimization completed successfully');
+    }
+    
+  } catch (error) {
+    await logger.log(`Error during optimization: ${error.message}`);
+    throw error;
+  }
+}
+
+main().catch(console.error);
