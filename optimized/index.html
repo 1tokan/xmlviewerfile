@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>XMLビューワ</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="a">
+        <div id="h">
+            <div id="ht">📊 XMLビューワ</div>
+            <div id="hc">
+                <input type="file" id="i" webkitdirectory multiple hidden>
+                <button class="b" onclick="i.click()">フォルダ選択</button>
+                <button class="b r" onclick="v.reset()">リセット</button>
+            </div>
+            <div id="hs">準備完了</div>
+        </div>
+        <div id="m">
+            <div id="s">
+                <div id="u">
+                    <h3>📁 選択</h3>
+                    <p>フォルダをD&Dまたは選択</p>
+                </div>
+                <div id="p">
+                    <div id="pb">処理中...</div>
+                </div>
+                <div id="t"></div>
+            </div>
+            <div id="c">
+                <div id="h2">カテゴリ選択</div>
+                <div id="g">
+                    <div class="em">選択でファイル表示</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="mo" onclick="v.closeModal(event)">
+        <div class="mc">
+            <img id="mi">
+            <div id="mf"></div>
+            <button class="mx" onclick="v.closeModal()">&times;</button>
+            <div class="mn">
+                <button onclick="v.prevPhoto()">‹</button>
+                <button onclick="v.nextPhoto()">›</button>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
