@@ -1,0 +1,1 @@
+{"timestamp":"2025-07-09T23:03:54.646Z","iteration":0,"error":"index.html not found","stack":"Error: index.html not found\n    at XMLViewerOptimizer.run (/home/runner/work/xmlviewerfile/xmlviewerfile/optimize.js:247:15)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)"}
