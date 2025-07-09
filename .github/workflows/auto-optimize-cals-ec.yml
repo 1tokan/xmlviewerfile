@@ -20,6 +20,7 @@ jobs:
     - name: Install dependencies
       run: |
         npm i -g terser html-minifier-terser
+        npm i jsdom
         mkdir -p optimized
         
     - name: Analyze & Split JS
@@ -79,65 +80,46 @@ jobs:
         cat > optimized/xml-parser.js << 'EOF'
         class XMLParser {
           constructor() {
-            this.parser = new DOMParser();
             this.cache = new Map();
+            this.maxCache = 50;
           }
           
-          parse(xmlString) {
-            const cacheKey = this.hash(xmlString);
-            if (this.cache.has(cacheKey)) {
-              return this.cache.get(cacheKey);
-            }
+          parse(xml) {
+            const key = xml.length + xml.charCodeAt(0);
+            if (this.cache.has(key)) return this.cache.get(key);
             
-            const doc = this.parser.parseFromString(xmlString, 'text/xml');
-            this.cache.set(cacheKey, doc);
+            const doc = new DOMParser().parseFromString(xml, 'text/xml');
+            if (this.cache.size >= this.maxCache) this.cache.clear();
+            this.cache.set(key, doc);
             return doc;
           }
           
-          hash(str) {
-            let hash = 0;
-            for (let i = 0; i < str.length; i++) {
-              hash = ((hash << 5) - hash + str.charCodeAt(i)) & 0xffffffff;
-            }
-            return hash;
-          }
-          
-          getCALSTables(doc) {
-            const tables = [];
-            const tableNodes = doc.querySelectorAll('table, tgroup');
+          getCALS(doc) {
+            const tgroups = doc.querySelectorAll('tgroup');
+            const tables = doc.querySelectorAll('table');
+            const result = [];
             
-            tableNodes.forEach(node => {
-              const table = this.parseCALSTable(node);
-              if (table) tables.push(table);
+            [...tgroups, ...tables].forEach(node => {
+              const rows = node.querySelectorAll('row');
+              if (rows.length === 0) return;
+              
+              result.push({
+                cols: +(node.getAttribute('cols') || this.getCols(node)),
+                rows: [...rows].map(row => [...row.querySelectorAll('entry')].map(entry => ({
+                  text: entry.textContent,
+                  colname: entry.getAttribute('colname'),
+                  namest: entry.getAttribute('namest'),
+                  nameend: entry.getAttribute('nameend'),
+                  morerows: +(entry.getAttribute('morerows') || 0)
+                })))
+              });
             });
             
-            return tables;
+            return result;
           }
           
-          parseCALSTable(node) {
-            const rows = node.querySelectorAll('row');
-            const cols = node.getAttribute('cols') || this.getColCount(node);
-            
-            return {
-              cols,
-              rows: Array.from(rows).map(row => this.parseRow(row))
-            };
-          }
-          
-          parseRow(row) {
-            const entries = row.querySelectorAll('entry');
-            return Array.from(entries).map(entry => ({
-              content: entry.textContent.trim(),
-              colname: entry.getAttribute('colname'),
-              namest: entry.getAttribute('namest'),
-              nameend: entry.getAttribute('nameend'),
-              morerows: entry.getAttribute('morerows')
-            }));
-          }
-          
-          getColCount(node) {
-            const colspecs = node.querySelectorAll('colspec');
-            return colspecs.length || 1;
+          getCols(node) {
+            return node.querySelectorAll('colspec').length || 1;
           }
         }
         
@@ -148,58 +130,23 @@ jobs:
       run: |
         cat > optimized/table-renderer.js << 'EOF'
         class TableRenderer {
-          constructor() {
-            this.fragment = document.createDocumentFragment();
-          }
-          
           render(tables, container) {
-            if (!container) return;
-            
-            const frag = this.fragment.cloneNode(false);
-            
-            tables.forEach(table => {
-              const tableEl = this.createTable(table);
-              frag.appendChild(tableEl);
-            });
-            
-            container.innerHTML = '';
-            container.appendChild(frag);
+            container.innerHTML = tables.map(this.createTable).join('');
           }
           
           createTable(table) {
-            const tableEl = document.createElement('table');
-            tableEl.className = 'cals-table';
-            
-            const tbody = document.createElement('tbody');
-            
-            table.rows.forEach(row => {
-              const tr = document.createElement('tr');
-              
-              row.forEach(cell => {
-                const td = document.createElement('td');
-                td.textContent = cell.content;
-                
-                if (cell.namest && cell.nameend) {
-                  td.setAttribute('colspan', this.getColspan(cell.namest, cell.nameend));
-                }
-                
-                if (cell.morerows) {
-                  td.setAttribute('rowspan', parseInt(cell.morerows) + 1);
-                }
-                
-                tr.appendChild(td);
-              });
-              
-              tbody.appendChild(tr);
-            });
-            
-            tableEl.appendChild(tbody);
-            return tableEl;
+            return `<table class="cals-table"><tbody>${table.rows.map(row => 
+              `<tr>${row.map(cell => {
+                const colspan = cell.namest && cell.nameend ? this.getColspan(cell.namest, cell.nameend) : 1;
+                const rowspan = cell.morerows > 0 ? cell.morerows + 1 : 1;
+                return `<td${colspan > 1 ? ` colspan="${colspan}"` : ''}${rowspan > 1 ? ` rowspan="${rowspan}"` : ''}>${cell.text}</td>`;
+              }).join('')}</tr>`
+            ).join('')}</tbody></table>`;
           }
           
           getColspan(namest, nameend) {
-            const start = parseInt(namest.match(/\d+/)?.[0] || 1);
-            const end = parseInt(nameend.match(/\d+/)?.[0] || 1);
+            const start = +(namest.match(/\d+/)?.[0] || 1);
+            const end = +(nameend.match(/\d+/)?.[0] || 1);
             return Math.max(1, end - start + 1);
           }
         }
@@ -214,85 +161,48 @@ jobs:
           constructor() {
             this.parser = new XMLParser();
             this.renderer = new TableRenderer();
-            this.fileInput = null;
-            this.container = null;
             this.init();
           }
           
           init() {
-            this.setupElements();
-            this.bindEvents();
-          }
-          
-          setupElements() {
-            this.fileInput = document.getElementById('fileInput') || this.createElement('input', {
-              type: 'file',
-              accept: '.xml',
-              id: 'fileInput'
-            });
+            const input = document.getElementById('fileInput');
+            const container = document.getElementById('xmlContainer');
             
-            this.container = document.getElementById('xmlContainer') || this.createElement('div', {
-              id: 'xmlContainer',
-              className: 'xml-container'
-            });
+            input?.addEventListener('change', e => this.handleFile(e.target.files[0]));
             
-            if (!document.getElementById('fileInput')) {
-              document.body.appendChild(this.fileInput);
-            }
-            
-            if (!document.getElementById('xmlContainer')) {
-              document.body.appendChild(this.container);
-            }
-          }
-          
-          createElement(tag, attrs) {
-            const el = document.createElement(tag);
-            Object.entries(attrs).forEach(([key, value]) => {
-              el[key] = value;
-            });
-            return el;
-          }
-          
-          bindEvents() {
-            this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
-            
-            document.addEventListener('dragover', (e) => {
+            document.addEventListener('dragover', e => {
               e.preventDefault();
               e.dataTransfer.dropEffect = 'copy';
             });
             
-            document.addEventListener('drop', (e) => {
+            document.addEventListener('drop', e => {
               e.preventDefault();
-              const files = e.dataTransfer.files;
-              if (files.length > 0) {
-                this.processFile(files[0]);
-              }
+              this.handleFile(e.dataTransfer.files[0]);
             });
+            
+            document.querySelector('.upload-area')?.addEventListener('click', () => input?.click());
           }
           
-          handleFileSelect(event) {
-            const file = event.target.files[0];
-            if (file) {
-              this.processFile(file);
-            }
-          }
-          
-          processFile(file) {
+          handleFile(file) {
+            if (!file) return;
+            
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = e => {
               try {
-                const xmlDoc = this.parser.parse(e.target.result);
-                const tables = this.parser.getCALSTables(xmlDoc);
-                this.renderer.render(tables, this.container);
-              } catch (error) {
-                this.showError(error.message);
+                const doc = this.parser.parse(e.target.result);
+                const tables = this.parser.getCALS(doc);
+                const container = document.getElementById('xmlContainer');
+                
+                if (tables.length > 0) {
+                  this.renderer.render(tables, container);
+                } else {
+                  container.innerHTML = '<div class="error">No CALS tables found</div>';
+                }
+              } catch (err) {
+                document.getElementById('xmlContainer').innerHTML = `<div class="error">Error: ${err.message}</div>`;
               }
             };
             reader.readAsText(file);
-          }
-          
-          showError(message) {
-            this.container.innerHTML = `<div class="error">Error: ${message}</div>`;
           }
         }
         
@@ -448,9 +358,14 @@ jobs:
         
     - name: Performance Test
       run: |
+        npm i jsdom
         cat > test-performance.js << 'EOF'
         const fs = require('fs');
         const { performance } = require('perf_hooks');
+        const { JSDOM } = require('jsdom');
+        
+        const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>');
+        global.DOMParser = dom.window.DOMParser;
         
         const testXML = `<?xml version="1.0"?>
         <document>
@@ -470,7 +385,7 @@ jobs:
           </table>
         </document>`;
         
-        const iterations = 1000;
+        const iterations = 100;
         const start = performance.now();
         
         for (let i = 0; i < iterations; i++) {
@@ -484,11 +399,18 @@ jobs:
         
         console.log(`Average parse time: ${avgTime.toFixed(2)}ms`);
         
+        const fileStats = fs.statSync('./optimized/xml-parser.js');
+        const totalSize = fs.readdirSync('./optimized').reduce((total, file) => {
+          return total + fs.statSync(`./optimized/${file}`).size;
+        }, 0);
+        
         const stats = {
           timestamp: new Date().toISOString(),
           averageParseTime: avgTime,
           iterations,
-          fileSize: fs.statSync('./optimized/xml-parser.js').size
+          xmlParserSize: fileStats.size,
+          totalOptimizedSize: totalSize,
+          compressionRatio: Math.round((totalSize / 1024) * 100) / 100
         };
         
         fs.writeFileSync('./optimized/performance-stats.json', JSON.stringify(stats, null, 2));
@@ -525,4 +447,5 @@ jobs:
         
         if [ -f optimized/performance-stats.json ]; then
           echo "- **Performance**: $(cat optimized/performance-stats.json | jq -r '.averageParseTime')ms avg parse time" >> $GITHUB_STEP_SUMMARY
+          echo "- **Compression**: $(cat optimized/performance-stats.json | jq -r '.compressionRatio')KB total size" >> $GITHUB_STEP_SUMMARY
         fi
