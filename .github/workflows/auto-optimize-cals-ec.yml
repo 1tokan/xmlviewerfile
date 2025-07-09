@@ -559,3 +559,4 @@ EOF
           echo "- **Performance**: $(cat optimized/performance-stats.json | jq -r '.averageParseTime')ms avg parse time" >> $GITHUB_STEP_SUMMARY
           echo "- **Compression**: $(cat optimized/performance-stats.json | jq -r '.compressionRatio')KB total size" >> $GITHUB_STEP_SUMMARY
         fi
+        
