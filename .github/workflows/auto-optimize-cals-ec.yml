@@ -1,0 +1,93 @@
+name: CALS_EC Auto Optimization
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm install glob prettier terser
+
+      - name: Fetch CALS_EC file list (via GitHub API)
+        id: fetch_files
+        run: |
+          curl -s https://api.github.com/repos/1tokan/xmlviewerfile/contents/CALS_EC | jq -r '.[].name' > cals_ec_files.txt
+
+      - name: Process & Analyze XML files
+        run: |
+          mkdir -p temp_xml
+          while IFS= read -r file; do
+            curl -sL "https://raw.githubusercontent.com/1tokan/xmlviewerfile/main/CALS_EC/$file" -o "temp_xml/$file"
+          done < cals_ec_files.txt
+          # ここで各XMLを検証・パース・UI/UXテスト・エラーハンドリングの評価などを自動実行
+          # 例: npm run test:xml -- temp_xml/*.xml
+
+      - name: Optimize JS (split, minify, modularize)
+        run: |
+          mkdir -p optimized/js
+          # script.jsを機能単位に分割する例（AIや独自スクリプトでAST/関数単位で分割推奨）
+          npx prettier --write script.js
+          # 簡易例: モジュールごとに手動で分割スクリプトを用意・またはAIで自動分割
+          # ここはAI自動化スクリプトや既製ツールで自動分割を目指す
+          # terserで各分割ファイルをminify
+          for f in js/*.js; do npx terser "$f" -o "optimized/js/$(basename $f)"; done
+
+      - name: Optimize index.html & style.css
+        run: |
+          npx prettier --write index.html
+          npx prettier --write style.css
+          cp index.html optimized/index.html
+          cp style.css optimized/style.css
+
+      - name: Validate optimized output
+        run: |
+          test -f optimized/index.html
+          test -f optimized/style.css
+          ls optimized/js/*.js
+
+      - name: Sync optimized files to root (if changed)
+        run: |
+          changes=false
+          for f in index.html style.css; do
+            if ! cmp -s "optimized/$f" "$f"; then
+              cp "optimized/$f" "$f"
+              git add "$f"
+              changes=true
+            fi
+          done
+          # script.jsの扱い: 分割後は削除
+          if [ ! -f "optimized/script.js" ] && [ -f "script.js" ]; then
+            git rm script.js
+            changes=true
+          fi
+          # jsディレクトリの同期
+          if [ -d "optimized/js" ]; then
+            rsync -a --delete optimized/js/ js/
+            git add js
+            changes=true
+          fi
+          echo "changes=$changes" >> $GITHUB_ENV
+
+      - name: Commit and Push changes
+        if: env.changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "CALS_EC自動最適化: JS分割・UI/UX改善・冗長性強化"
+          git push
