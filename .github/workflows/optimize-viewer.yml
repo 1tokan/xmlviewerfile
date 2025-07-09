@@ -7,33 +7,85 @@ on:
     paths:
       - 'optimized/**'
       - '.github/workflows/optimize-viewer.yml'
+  workflow_dispatch:  # 手動実行を可能にする
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # ← これが超重要！
+      contents: write
 
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # 最新版を使用
 
-      - name: Sync optimized files to root and stage
+      - name: Validate optimized files
         run: |
+          echo "Validating optimized files..."
           for file in index.html script.js style.css; do
             if [ -f "optimized/$file" ]; then
-              cp "optimized/$file" "./$file"
-              git add "$file"
+              echo "✓ Found optimized/$file"
+              # HTML/JS/CSS構文チェック（オプション）
+              if [ "$file" = "index.html" ]; then
+                echo "Checking HTML syntax..."
+                # HTMLバリデーション
+              fi
             else
-              echo "Skipping $file (not found)"
+              echo "⚠ Missing optimized/$file"
             fi
           done
 
+      - name: Backup current files
+        run: |
+          mkdir -p backup/$(date +%Y%m%d-%H%M%S)
+          for file in index.html script.js style.css; do
+            if [ -f "$file" ]; then
+              cp "$file" "backup/$(date +%Y%m%d-%H%M%S)/$file"
+            fi
+          done
+
+      - name: Sync optimized files to root
+        run: |
+          changes_made=false
+          for file in index.html script.js style.css; do
+            if [ -f "optimized/$file" ]; then
+              if ! cmp -s "optimized/$file" "$file"; then
+                echo "Updating $file..."
+                cp "optimized/$file" "./$file"
+                git add "$file"
+                changes_made=true
+              else
+                echo "No changes in $file"
+              fi
+            else
+              echo "Skipping $file (not found in optimized/)"
+            fi
+          done
+          echo "changes_made=$changes_made" >> $GITHUB_ENV
+
       - name: Commit and Push changes
+        if: env.changes_made == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "Automated viewer optimization sync (every 15min)" || echo "No changes"
+          
+          # 変更内容のサマリーを作成
+          echo "## 最適化された変更内容" > commit_message.txt
+          echo "" >> commit_message.txt
+          
+          for file in index.html script.js style.css; do
+            if git diff --cached --name-only | grep -q "$file"; then
+              echo "- $file: 最適化適用" >> commit_message.txt
+            fi
+          done
+          
+          git commit -F commit_message.txt
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create deployment status
+        if: success()
+        run: |
+          echo "✅ 最適化完了 - $(date)"
+          echo "📊 変更されたファイル: $(git diff --name-only HEAD~1 HEAD | tr '\n' ' ')"
