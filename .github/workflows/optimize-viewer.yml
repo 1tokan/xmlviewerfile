@@ -2,7 +2,7 @@ name: Optimize Viewer Sync
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # 15分ごと
+    - cron: '*/15 * * * *'
   push:
     paths:
       - 'optimized/**'
@@ -11,12 +11,14 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # ← これが超重要！
 
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      - name: Sync optimized files to root
+      - name: Sync optimized files to root and stage
         run: |
           for file in index.html script.js style.css; do
             if [ -f "optimized/$file" ]; then
@@ -33,3 +35,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "Automated viewer optimization sync (every 15min)" || echo "No changes"
           git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
