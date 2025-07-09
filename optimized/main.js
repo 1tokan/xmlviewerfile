@@ -1,0 +1,1 @@
+document.addEventListener("DOMContentLoaded",()=>{new UIController;console.log("XML Viewer initialized")});
