@@ -7,7 +7,7 @@ on:
     paths:
       - 'optimized/**'
       - '.github/workflows/optimize-viewer.yml'
-  workflow_dispatch:  # 手動実行を可能にする
+  workflow_dispatch:  # 手動実行も可能
 
 jobs:
   sync:
@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4  # 最新版を使用
+        uses: actions/checkout@v4
 
       - name: Validate optimized files
         run: |
@@ -25,31 +25,35 @@ jobs:
           for file in index.html script.js style.css; do
             if [ -f "optimized/$file" ]; then
               echo "✓ Found optimized/$file"
-              # HTML/JS/CSS構文チェック（オプション）
-              if [ "$file" = "index.html" ]; then
-                echo "Checking HTML syntax..."
-                # HTMLバリデーション
-              fi
             else
               echo "⚠ Missing optimized/$file"
             fi
           done
+          if [ -d "optimized/js" ]; then
+            echo "✓ Found optimized/js/"
+          else
+            echo "⚠ Missing optimized/js/"
+          fi
 
-      - name: Backup current files
+      - name: Backup current files and js directory
         run: |
-          mkdir -p backup/$(date +%Y%m%d-%H%M%S)
+          backup_dir="backup/$(date +%Y%m%d-%H%M%S)"
+          mkdir -p "$backup_dir"
           for file in index.html script.js style.css; do
             if [ -f "$file" ]; then
-              cp "$file" "backup/$(date +%Y%m%d-%H%M%S)/$file"
+              cp "$file" "$backup_dir/$file"
             fi
           done
+          if [ -d js ]; then
+            cp -r js "$backup_dir/js"
+          fi
 
-      - name: Sync optimized files to root
+      - name: Sync optimized files and js dir to root（+script.js削除対応）
         run: |
           changes_made=false
-          for file in index.html script.js style.css; do
+          for file in index.html style.css; do
             if [ -f "optimized/$file" ]; then
-              if ! cmp -s "optimized/$file" "$file"; then
+              if ! cmp -s "optimized/$file" "./$file"; then
                 echo "Updating $file..."
                 cp "optimized/$file" "./$file"
                 git add "$file"
@@ -61,6 +65,34 @@ jobs:
               echo "Skipping $file (not found in optimized/)"
             fi
           done
+
+          # script.jsの反映または削除
+          if [ -f "optimized/script.js" ]; then
+            if ! cmp -s "optimized/script.js" "./script.js"; then
+              echo "Updating script.js..."
+              cp "optimized/script.js" "./script.js"
+              git add "script.js"
+              changes_made=true
+            else
+              echo "No changes in script.js"
+            fi
+          else
+            if [ -f "./script.js" ]; then
+              echo "Removing script.js (not present in optimized/)..."
+              git rm "./script.js"
+              changes_made=true
+            fi
+          fi
+
+          # jsディレクトリの同期
+          if [ -d "optimized/js" ]; then
+            mkdir -p js
+            rsync -a --delete optimized/js/ js/
+            git add js
+            changes_made=true
+            echo "js directory synced."
+          fi
+
           echo "changes_made=$changes_made" >> $GITHUB_ENV
 
       - name: Commit and Push changes
@@ -68,17 +100,20 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 変更内容のサマリーを作成
+
           echo "## 最適化された変更内容" > commit_message.txt
           echo "" >> commit_message.txt
-          
-          for file in index.html script.js style.css; do
+
+          for file in index.html style.css script.js; do
             if git diff --cached --name-only | grep -q "$file"; then
-              echo "- $file: 最適化適用" >> commit_message.txt
+              echo "- $file: 最適化適用または削除" >> commit_message.txt
             fi
           done
-          
+
+          if git diff --cached --name-only | grep -q "^js/"; then
+            echo "- js/: 分割JS最適化" >> commit_message.txt
+          fi
+
           git commit -F commit_message.txt
           git push
         env:
