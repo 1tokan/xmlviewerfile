@@ -1,611 +1,133 @@
-name: XML Viewer Auto-Optimizer
+name: CALS_EC Auto Optimization
+
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 */15 * * *'  # Every 15 minutes
   workflow_dispatch:
-  push:
-    paths: ['CALS_EC/**']
 
 jobs:
   optimize:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
-        
+        node-version: '20'
+    
     - name: Install dependencies
+      run: npm install terser html-minifier-terser
+    
+    - name: Optimize with Claude
+      env:
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       run: |
-        npm i -g terser html-minifier-terser
-        npm i jsdom
-        mkdir -p optimized
+        node -e "
+        const fs=require('fs');
+        const path=require('path');
+        const https=require('https');
+        const {minify}=require('terser');
+        const {minify:htmlMinify}=require('html-minifier-terser');
         
-    - name: Analyze & Split JS
-      run: |
-        cat > split.js << 'EOF'
-        const fs = require('fs');
-        const path = require('path');
+        const API_KEY=process.env.ANTHROPIC_API_KEY;
+        const srcDir='./tree/main/CALS_EC';
+        const outDir='./optimized';
         
-        const srcPath = './CALS_EC/script.js';
-        const outDir = './optimized';
+        if(!fs.existsSync(outDir))fs.mkdirSync(outDir,{recursive:true});
         
-        if (!fs.existsSync(srcPath)) {
-          console.log('Source script not found');
-          process.exit(0);
-        }
-        
-        const content = fs.readFileSync(srcPath, 'utf8');
-        const lines = content.split('\n');
-        
-        let modules = {
-          'xml-parser.js': [],
-          'table-renderer.js': [],
-          'ui-controller.js': [],
-          'utils.js': [],
-          'main.js': []
+        const callClaude=async(prompt)=>{
+          const data=JSON.stringify({
+            model:'claude-sonnet-4-20250514',
+            max_tokens:4000,
+            messages:[{role:'user',content:prompt}]
+          });
+          
+          return new Promise((resolve,reject)=>{
+            const req=https.request({
+              hostname:'api.anthropic.com',
+              path:'/v1/messages',
+              method:'POST',
+              headers:{
+                'Content-Type':'application/json',
+                'Content-Length':data.length,
+                'x-api-key':API_KEY,
+                'anthropic-version':'2023-06-01'
+              }
+            },res=>{
+              let body='';
+              res.on('data',chunk=>body+=chunk);
+              res.on('end',()=>resolve(JSON.parse(body)));
+            });
+            req.on('error',reject);
+            req.write(data);
+            req.end();
+          });
         };
         
-        let currentModule = 'main.js';
-        
-        lines.forEach(line => {
-          if (line.includes('XMLParser') || line.includes('parseXML')) {
-            currentModule = 'xml-parser.js';
-          } else if (line.includes('Table') || line.includes('CALS') || line.includes('render')) {
-            currentModule = 'table-renderer.js';
-          } else if (line.includes('UI') || line.includes('click') || line.includes('event')) {
-            currentModule = 'ui-controller.js';
-          } else if (line.includes('function') && !line.includes('main')) {
-            currentModule = 'utils.js';
-          }
+        const optimizeHTML=async()=>{
+          const htmlPath=path.join(srcDir,'index.html');
+          if(!fs.existsSync(htmlPath))return;
           
-          modules[currentModule].push(line);
-        });
-        
-        Object.entries(modules).forEach(([file, content]) => {
-          if (content.length > 0) {
-            fs.writeFileSync(path.join(outDir, file), content.join('\n'));
-          }
-        });
-        
-        console.log('JS modules split completed');
-        EOF
-        
-        node split.js
-        
-    - name: Create Optimized XML Parser
-      run: |
-    - name: Create Optimized XML Parser
-      run: |
-        cat > optimized/xml-parser.js << 'EOL'
-        class XMLParser {
-          constructor() {
-            this.cache = new Map();
-            this.maxCache = 50;
-          }
+          const html=fs.readFileSync(htmlPath,'utf8');
+          const jsFiles=fs.readdirSync(srcDir).filter(f=>f.endsWith('.js'));
+          const jsContent=jsFiles.map(f=>fs.readFileSync(path.join(srcDir,f),'utf8')).join('\n');
           
-          parse(xml) {
-            const key = xml.length + xml.charCodeAt(0);
-            if (this.cache.has(key)) return this.cache.get(key);
-            
-            try {
-              const doc = new DOMParser().parseFromString(xml, 'text/xml');
-              const parseError = doc.querySelector('parsererror');
-              if (parseError) {
-                throw new Error('XML Parse Error: ' + parseError.textContent);
-              }
-              
-              if (this.cache.size >= this.maxCache) this.cache.clear();
-              this.cache.set(key, doc);
-              return doc;
-            } catch (error) {
-              throw new Error('Failed to parse XML: ' + error.message);
-            }
-          }
+          const prompt=\`Optimize this HTML/JS for CALS_EC XML processing. Requirements:
+          - Pure JavaScript (no jQuery/Node.js)
+          - Handle diverse XML files with redundancy
+          - Minimize code size while maintaining performance
+          - Split large JS files if needed
+          - Preserve all functionality
+          - Improve error handling
+          - Enhance UI/UX
           
-          getCALS(doc) {
-            const tgroups = doc.querySelectorAll('tgroup');
-            const tables = doc.querySelectorAll('table');
-            const result = [];
-            
-            [...tgroups, ...tables].forEach(node => {
-              const rows = node.querySelectorAll('row');
-              if (rows.length === 0) return;
-              
-              result.push({
-                cols: parseInt(node.getAttribute('cols') || this.getCols(node)),
-                rows: [...rows].map(row => [...row.querySelectorAll('entry')].map(entry => ({
-                  text: entry.textContent.trim() || '',
-                  colname: entry.getAttribute('colname') || '',
-                  namest: entry.getAttribute('namest') || '',
-                  nameend: entry.getAttribute('nameend') || '',
-                  morerows: parseInt(entry.getAttribute('morerows') || '0')
-                })))
-              });
+          HTML:\${html}
+          JS:\${jsContent}
+          
+          Return optimized code with clear file separation.\`;
+          
+          const response=await callClaude(prompt);
+          const optimizedCode=response.content[0].text;
+          
+          // Extract and save optimized files
+          const htmlMatch=optimizedCode.match(/<html[^>]*>[\s\S]*<\/html>/i);
+          const jsMatch=optimizedCode.match(/\/\/ main\.js[\s\S]*?(?=\/\/|$)/);
+          
+          if(htmlMatch){
+            const minifiedHTML=await htmlMinify(htmlMatch[0],{
+              collapseWhitespace:true,
+              removeComments:true,
+              minifyJS:true,
+              minifyCSS:true
             });
-            
-            return result;
+            fs.writeFileSync(path.join(outDir,'index.html'),minifiedHTML);
           }
           
-          getCols(node) {
-            const colspecs = node.querySelectorAll('colspec');
-            return colspecs.length || 1;
-          }
-        }
-        
-        if (typeof window !== 'undefined') {
-          window.XMLParser = XMLParser;
-        }
-        EOL
-        
-    - name: Create Optimized Table Renderer
-      run: |
-    - name: Create Optimized Table Renderer
-      run: |
-        cat > optimized/table-renderer.js << 'EOL'
-        class TableRenderer {
-          render(tables, container) {
-            if (!container) {
-              console.error('Container not found');
-              return;
-            }
-            
-            if (!tables || tables.length === 0) {
-              container.innerHTML = '<div class="error">No CALS tables found in the XML file</div>';
-              return;
-            }
-            
-            const html = tables.map((table, index) => {
-              return `<div class="table-wrapper">
-                <h3>Table ${index + 1}</h3>
-                <table class="cals-table">
-                  <tbody>
-                    ${table.rows.map(row => `<tr>${row.map(cell => {
-                      const colspan = cell.namest && cell.nameend ? this.getColspan(cell.namest, cell.nameend) : 1;
-                      const rowspan = cell.morerows > 0 ? cell.morerows + 1 : 1;
-                      return `<td${colspan > 1 ? ` colspan="${colspan}"` : ''}${rowspan > 1 ? ` rowspan="${rowspan}"` : ''}>${this.escapeHtml(cell.text)}</td>`;
-                    }).join('')}</tr>`).join('')}
-                  </tbody>
-                </table>
-              </div>`;
-            }).join('');
-            
-            container.innerHTML = html;
+          if(jsMatch){
+            const minifiedJS=await minify(jsMatch[0]);
+            fs.writeFileSync(path.join(outDir,'main.js'),minifiedJS.code);
           }
           
-          getColspan(namest, nameend) {
-            const start = parseInt(namest.match(/\d+/)?.[0] || '1');
-            const end = parseInt(nameend.match(/\d+/)?.[0] || '1');
-            return Math.max(1, end - start + 1);
-          }
-          
-          escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-          }
-        }
-        
-        if (typeof window !== 'undefined') {
-          window.TableRenderer = TableRenderer;
-        }
-        EOL
-        
-    - name: Create Optimized UI Controller
-      run: |
-    - name: Create Optimized UI Controller
-      run: |
-        cat > optimized/ui-controller.js << 'EOL'
-        class UIController {
-          constructor() {
-            this.parser = new XMLParser();
-            this.renderer = new TableRenderer();
-            this.init();
-          }
-          
-          init() {
-            document.addEventListener('DOMContentLoaded', () => {
-              this.setupEventListeners();
-            });
-            
-            if (document.readyState === 'loading') {
-              document.addEventListener('DOMContentLoaded', () => this.setupEventListeners());
-            } else {
-              this.setupEventListeners();
-            }
-          }
-          
-          setupEventListeners() {
-            const input = document.getElementById('fileInput');
-            const uploadArea = document.querySelector('.upload-area');
-            
-            if (input) {
-              input.addEventListener('change', e => {
-                const file = e.target.files[0];
-                if (file) this.handleFile(file);
-              });
-            }
-            
-            if (uploadArea) {
-              uploadArea.addEventListener('click', () => {
-                if (input) input.click();
-              });
-            }
-            
-            // Drag and drop
-            document.addEventListener('dragover', e => {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = 'copy';
-            });
-            
-            document.addEventListener('drop', e => {
-              e.preventDefault();
-              const file = e.dataTransfer.files[0];
-              if (file) this.handleFile(file);
-            });
-          }
-          
-          handleFile(file) {
-            if (!file) return;
-            
-            const container = document.getElementById('xmlContainer');
-            if (!container) return;
-            
-            container.innerHTML = '<div class="loading">Processing XML file...</div>';
-            
-            const reader = new FileReader();
-            reader.onload = e => {
-              try {
-                const content = e.target.result;
-                const doc = this.parser.parse(content);
-                const tables = this.parser.getCALS(doc);
-                
-                if (tables.length > 0) {
-                  this.renderer.render(tables, container);
-                  container.insertAdjacentHTML('afterbegin', 
-                    `<div class="success">Successfully loaded ${tables.length} CALS table(s) from ${file.name}</div>`);
-                } else {
-                  container.innerHTML = '<div class="error">No CALS tables found in the XML file. Please check if the file contains &lt;tgroup&gt; or &lt;table&gt; elements with &lt;row&gt; and &lt;entry&gt; children.</div>';
-                }
-              } catch (error) {
-                container.innerHTML = `<div class="error">Error processing file: ${error.message}</div>`;
-                console.error('XML processing error:', error);
-              }
-            };
-            
-            reader.onerror = () => {
-              container.innerHTML = '<div class="error">Error reading file</div>';
-            };
-            
-            reader.readAsText(file);
-          }
-        }
-        
-        if (typeof window !== 'undefined') {
-          window.UIController = UIController;
-        }
-        EOL
-        
-    - name: Create Optimized Utils
-      run: |
-        cat > optimized/utils.js << 'EOL'
-        const Utils = {
-          debounce(func, wait) {
-            let timeout;
-            return function(...args) {
-              const later = () => {
-                clearTimeout(timeout);
-                func.apply(this, args);
-              };
-              clearTimeout(timeout);
-              timeout = setTimeout(later, wait);
-            };
-          },
-          
-          throttle(func, limit) {
-            let inThrottle;
-            return function(...args) {
-              if (!inThrottle) {
-                func.apply(this, args);
-                inThrottle = true;
-                setTimeout(() => inThrottle = false, limit);
-              }
-            };
-          },
-          
-          formatXML(xml) {
-            try {
-              const PADDING = '  ';
-              const reg = /(>)(<)(\/*)/g;
-              let formatted = xml.replace(reg, '$1\r\n$2$3');
-              
-              let pad = 0;
-              return formatted.split('\r\n').map(line => {
-                let indent = 0;
-                if (line.match(/.+<\/\w[^>]*>$/)) {
-                  indent = 0;
-                } else if (line.match(/^<\/\w/)) {
-                  if (pad !== 0) pad -= 1;
-                } else if (line.match(/^<\w[^>]*[^\/]>.*$/)) {
-                  indent = 1;
-                } else {
-                  indent = 0;
-                }
-                
-                const padding = PADDING.repeat(pad);
-                pad += indent;
-                
-                return padding + line;
-              }).join('\r\n');
-            } catch (error) {
-              console.error('XML formatting error:', error);
-              return xml;
-            }
-          },
-          
-          validateXML(xmlString) {
-            try {
-              const parser = new DOMParser();
-              const doc = parser.parseFromString(xmlString, 'text/xml');
-              const parseError = doc.querySelector('parsererror');
-              
-              if (parseError) {
-                return { valid: false, error: parseError.textContent };
-              }
-              
-              return { valid: true, error: null };
-            } catch (error) {
-              return { valid: false, error: error.message };
-            }
-          },
-          
-          fileSize(bytes) {
-            if (bytes === 0) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-          }
+          console.log('Optimization completed');
         };
         
-        if (typeof window !== 'undefined') {
-          window.Utils = Utils;
-        }
-        EOL
-        
-    - name: Create Optimized Main
-      run: |
-        cat > optimized/main.js << 'EOL'
-        // Initialize the application
-        (function() {
-          'use strict';
-          
-          let app = null;
-          
-          function initApp() {
-            try {
-              if (typeof XMLParser === 'undefined' || 
-                  typeof TableRenderer === 'undefined' || 
-                  typeof UIController === 'undefined') {
-                console.error('Required classes not loaded');
-                return;
-              }
-              
-              app = new UIController();
-              console.log('XML Viewer initialized successfully');
-            } catch (error) {
-              console.error('Failed to initialize app:', error);
-              
-              // Fallback error display
-              const container = document.getElementById('xmlContainer');
-              if (container) {
-                container.innerHTML = '<div class="error">Failed to initialize application. Please refresh the page.</div>';
-              }
-            }
-          }
-          
-          // Initialize when DOM is ready
-          if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initApp);
-          } else {
-            initApp();
-          }
-        })();
-        EOL
-        
-    - name: Create Optimized HTML
-      run: |
-        cat > optimized/index.html << 'EOL'
-        <!DOCTYPE html>
-        <html lang="ja">
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>XML Viewer - CALS EC</title>
-          <style>
-            *{margin:0;padding:0;box-sizing:border-box}
-            body{font-family:Arial,sans-serif;background:#f5f5f5;padding:20px}
-            .container{max-width:1200px;margin:0 auto}
-            h1{color:#333;margin-bottom:20px;text-align:center}
-            .upload-area{border:2px dashed #007bff;padding:40px;text-align:center;margin:20px 0;background:#fff;border-radius:8px;cursor:pointer;transition:all 0.3s}
-            .upload-area:hover{border-color:#0056b3;background:#f8f9fa}
-            .upload-area p{color:#666;font-size:16px;margin:10px 0}
-            #fileInput{display:none}
-            .cals-table{width:100%;border-collapse:collapse;margin:20px 0;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,0.1)}
-            .cals-table td{border:1px solid #dee2e6;padding:12px;text-align:left;vertical-align:top}
-            .cals-table tr:nth-child(even){background:#f8f9fa}
-            .cals-table tr:hover{background:#e9ecef}
-            .error{color:#dc3545;background:#f8d7da;border:1px solid #f5c6cb;padding:12px;border-radius:4px;margin:20px 0}
-            .success{color:#155724;background:#d4edda;border:1px solid #c3e6cb;padding:12px;border-radius:4px;margin:20px 0}
-            .loading{text-align:center;padding:20px;color:#6c757d}
-            @media (max-width:768px){
-              body{padding:10px}
-              .upload-area{padding:20px}
-              .cals-table{font-size:14px}
-              .cals-table td{padding:8px}
-            }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h1>XML Viewer - CALS EC</h1>
-            <div class="upload-area" onclick="document.getElementById('fileInput').click()">
-              <input type="file" id="fileInput" accept=".xml">
-              <p>📁 XMLファイルをドロップまたはクリックして選択</p>
-              <p style="font-size:14px;color:#999;">CALS形式のテーブルを自動検出・表示します</p>
-            </div>
-            <div id="xmlContainer"></div>
-          </div>
-          
-          <script src="xml-parser.js"></script>
-          <script src="table-renderer.js"></script>
-          <script src="ui-controller.js"></script>
-          <script src="utils.js"></script>
-          <script src="main.js"></script>
-        </body>
-        </html>
-        EOL
-        
-    - name: Minify Files
-      run: |
-        cd optimized
-        
-        # Backup original files
-        for file in *.js *.html; do
-          cp "$file" "$file.original"
-        done
-        
-        # Minify JavaScript files
-        for file in *.js; do
-          if [ "$file" != "*.js" ]; then
-            echo "Minifying $file"
-            terser "$file" --compress --mangle --output "$file.min" || cp "$file" "$file.min"
-            mv "$file.min" "$file"
-          fi
-        done
-        
-        # Minify HTML
-        echo "Minifying HTML"
-        html-minifier-terser \
-          --collapse-whitespace \
-          --remove-comments \
-          --remove-optional-tags \
-          --remove-redundant-attributes \
-          --remove-script-type-attributes \
-          --remove-tag-whitespace \
-          --use-short-doctype \
-          --minify-css true \
-          --minify-js true \
-          index.html -o index.html.min || cp index.html index.html.min
-        
-        mv index.html.min index.html
-        
-        # Verify files exist and are not empty
-        for file in *.js index.html; do
-          if [ ! -s "$file" ]; then
-            echo "Warning: $file is empty, restoring from backup"
-            cp "$file.original" "$file" 2>/dev/null || echo "No backup found for $file"
-          fi
-        done
-        
-        # Clean up backup files
-        rm -f *.original
-        
-        echo "Minification completed"
-        ls -la
-        
-    - name: Performance Test
-      run: |
-        npm i jsdom
-        cat > test-performance.js << 'EOF'
-        const fs = require('fs');
-        const { performance } = require('perf_hooks');
-        const { JSDOM } = require('jsdom');
-        
-        const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>');
-        global.DOMParser = dom.window.DOMParser;
-        
-        const testXML = `<?xml version="1.0"?>
-        <document>
-          <table>
-            <tgroup cols="3">
-              <colspec colname="col1"/>
-              <colspec colname="col2"/>
-              <colspec colname="col3"/>
-              <tbody>
-                <row>
-                  <entry>Cell 1</entry>
-                  <entry>Cell 2</entry>
-                  <entry>Cell 3</entry>
-                </row>
-              </tbody>
-            </tgroup>
-          </table>
-        </document>`;
-        
-        const iterations = 100;
-        const start = performance.now();
-        
-        for (let i = 0; i < iterations; i++) {
-          const parser = new DOMParser();
-          const doc = parser.parseFromString(testXML, 'text/xml');
-          const tables = doc.querySelectorAll('table, tgroup');
-        }
-        
-        const end = performance.now();
-        const avgTime = (end - start) / iterations;
-        
-        console.log(`Average parse time: ${avgTime.toFixed(2)}ms`);
-        
-        const fileStats = fs.statSync('./optimized/xml-parser.js');
-        const totalSize = fs.readdirSync('./optimized').reduce((total, file) => {
-          return total + fs.statSync(`./optimized/${file}`).size;
-        }, 0);
-        
-        const stats = {
-          timestamp: new Date().toISOString(),
-          averageParseTime: avgTime,
-          iterations,
-          xmlParserSize: fileStats.size,
-          totalOptimizedSize: totalSize,
-          compressionRatio: Math.round((totalSize / 1024) * 100) / 100
-        };
-        
-        fs.writeFileSync('./optimized/performance-stats.json', JSON.stringify(stats, null, 2));
-        EOF
-        
-        node test-performance.js
-        
-    - name: Create Archive
-      run: |
-        cd optimized
-        tar -czf ../optimized-$(date +%Y%m%d-%H%M%S).tar.gz .
-        
-    - name: Commit Changes
+        optimizeHTML().catch(console.error);
+        "
+    
+    - name: Commit optimized files
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        
-        if [[ -n $(git status --porcelain) ]]; then
-          git add optimized/
-          git commit -m "Auto-optimize XML viewer - $(date +%Y-%m-%d\ %H:%M:%S)"
-          git push
-        fi
-        
-    - name: Clean Old Artifacts
+        git add optimized/
+        git diff --staged --quiet || git commit -m "Auto-optimize CALS_EC files [$(date)]"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Cleanup old optimizations
       run: |
-        find . -name "optimized-*.tar.gz" -mtime +30 -delete
-        
-    - name: Summary
-      run: |
-        echo "## Optimization Summary" >> $GITHUB_STEP_SUMMARY
-        echo "- **Timestamp**: $(date)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Files optimized**: $(ls -la optimized/ | wc -l) files" >> $GITHUB_STEP_SUMMARY
-        echo "- **Total size**: $(du -sh optimized/ | cut -f1)" >> $GITHUB_STEP_SUMMARY
-        
-        if [ -f optimized/performance-stats.json ]; then
-          echo "- **Performance**: $(cat optimized/performance-stats.json | jq -r '.averageParseTime')ms avg parse time" >> $GITHUB_STEP_SUMMARY
-          echo "- **Compression**: $(cat optimized/performance-stats.json | jq -r '.compressionRatio')KB total size" >> $GITHUB_STEP_SUMMARY
-        fi
+        find ./optimized -name "*.bak" -mtime +1 -delete
+        find ./optimized -name "*.tmp" -mtime +1 -delete
