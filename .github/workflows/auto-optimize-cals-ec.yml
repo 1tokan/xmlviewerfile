@@ -9,14 +9,15 @@ on:
         required: false
         default: 'false'
       target_folder:
-        description: '対象フォルダ (デフォルト: CALS_EC)'
+        description: 'XMLデータフォルダ (デフォルト: CALS_EC)'
         required: false
         default: 'CALS_EC'
 
 env:
   OPTIMIZATION_CYCLES: 9999000000000000  # 9999京回最適化
   TARGET_REPO: 'https://github.com/1tokan/xmlviewerfile'
-  TARGET_FOLDER: 'CALS_EC'
+  TARGET_FILES: 'index.html,style.css,script.js'  # 最適化対象ファイル
+  DATA_FOLDER: 'CALS_EC'  # XMLデータフォルダ（最適化対象外）
   OUTPUT_FOLDER: 'optimized'
   CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
   MAX_EXECUTION_DAYS: 30
@@ -101,7 +102,8 @@ jobs:
                 self.api_key = os.environ.get('CLAUDE_API_KEY')
                 self.base_url = "https://api.anthropic.com/v1/messages"
                 self.max_cycles = int(os.environ.get('OPTIMIZATION_CYCLES', 9999000000000000))
-                self.target_folder = os.environ.get('TARGET_FOLDER', 'CALS_EC')
+                self.target_files = os.environ.get('TARGET_FILES', 'index.html,style.css,script.js').split(',')
+                self.data_folder = os.environ.get('DATA_FOLDER', 'CALS_EC')
                 self.output_folder = os.environ.get('OUTPUT_FOLDER', 'optimized')
                 self.optimization_phase = os.environ.get('MATRIX_OPTIMIZATION_PHASE', 'html_structure')
                 
@@ -154,7 +156,7 @@ jobs:
             
             def optimize_html(self):
                 """HTMLファイルの最適化"""
-                html_path = f"{self.target_folder}/index.html"
+                html_path = "index.html"  # ルートディレクトリのindex.html
                 html_content = self.read_file_safe(html_path)
                 
                 if not html_content:
@@ -170,12 +172,14 @@ jobs:
                 - 仕様完全網羅
                 - UI/UX向上
                 
-                【要件】
-                - JavaScriptのみで動作
+                【重要な要件】
+                - このindex.htmlは/{self.data_folder}/フォルダ内のXMLファイルを表示するビューワです
+                - JavaScriptのみで動作（jQuery/Node.js不使用）
                 - XMLビューワ機能の完全再現
-                - CALS_EC以外のフォルダ選択対応
+                - {self.data_folder}以外のフォルダも選択可能にする
                 - Shift_JIS文字化け対応
                 - DTD非一致エラー対応
+                - 関連するCSS/JSファイルの読み込みパスを適切に設定
                 
                 【入力HTML】
                 {html_content}
@@ -193,7 +197,7 @@ jobs:
             
             def optimize_css(self):
                 """CSSファイルの最適化"""
-                css_path = f"{self.target_folder}/style.css"
+                css_path = "style.css"  # ルートディレクトリのstyle.css
                 css_content = self.read_file_safe(css_path)
                 
                 if not css_content:
@@ -208,6 +212,11 @@ jobs:
                 - レスポンシブデザイン対応
                 - ブラウザ互換性確保
                 - 可読性維持
+                
+                【用途】
+                - XMLビューワ（index.html）用のスタイルシート
+                - {self.data_folder}フォルダ内のXMLファイル表示用
+                - 複数フォルダ対応のUI
                 
                 【分割条件】
                 - 肥大化時は意味単位で分割
@@ -234,7 +243,7 @@ jobs:
             
             def optimize_javascript(self):
                 """JavaScriptファイルの最適化"""
-                js_path = f"{self.target_folder}/script.js"
+                js_path = "script.js"  # ルートディレクトリのscript.js
                 js_content = self.read_file_safe(js_path)
                 
                 if not js_content:
@@ -250,6 +259,11 @@ jobs:
                 - 保守性向上
                 - 機能完全再現
                 
+                【用途】
+                - XMLビューワ（index.html）の動作制御
+                - {self.data_folder}フォルダ内のXMLファイル読み込み・表示
+                - 複数フォルダ対応（手作業でのフォルダ選択機能）
+                
                 【分割条件】
                 - 肥大化時は機能単位で分割
                 - 推奨ファイル名: xmlParser.js, domRenderer.js, fileLoader.js, errorHandler.js
@@ -261,7 +275,8 @@ jobs:
                 - XML解析機能の高速化
                 - DOM操作の最適化
                 - 例外処理の強化
-                - 文字エンコーディング対応
+                - 文字エンコーディング対応（Shift_JIS等）
+                - DTD検証対応
                 
                 【入力JavaScript】
                 {js_content}
@@ -310,7 +325,7 @@ jobs:
             
             def performance_test(self):
                 """性能テストの実行"""
-                original_path = f"{self.target_folder}/index.html"
+                original_path = "index.html"  # ルートディレクトリ
                 optimized_path = f"{self.output_folder}/index.html"
                 
                 # 簡易性能比較（ファイルサイズ、読み込み時間推定）
@@ -320,18 +335,38 @@ jobs:
                     
                     reduction_rate = (original_size - optimized_size) / original_size * 100
                     
+                    # 関連ファイルも含めた全体サイズ比較
+                    original_total = original_size
+                    optimized_total = optimized_size
+                    
+                    # CSS/JSファイルのサイズも計算
+                    for file_type in ['css', 'js']:
+                        original_file = f"style.{file_type}" if file_type == 'css' else f"script.{file_type}"
+                        if os.path.exists(original_file):
+                            original_total += os.path.getsize(original_file)
+                        
+                        # 最適化されたファイル群のサイズ
+                        for opt_file in os.listdir(self.output_folder):
+                            if opt_file.endswith(f'.{file_type}'):
+                                optimized_total += os.path.getsize(f"{self.output_folder}/{opt_file}")
+                    
+                    total_reduction = (original_total - optimized_total) / original_total * 100
+                    
                     # 性能メトリクス記録
                     metrics = {
                         'original_size': original_size,
                         'optimized_size': optimized_size,
                         'reduction_rate': reduction_rate,
+                        'original_total': original_total,
+                        'optimized_total': optimized_total,
+                        'total_reduction': total_reduction,
                         'timestamp': datetime.now().isoformat()
                     }
                     
                     with open('.optimization_state/performance.json', 'w') as f:
                         json.dump(metrics, f, indent=2)
                     
-                    return reduction_rate > 0  # 改善があれば成功
+                    return total_reduction > 0  # 全体的な改善があれば成功
                 except:
                     return False
             
@@ -384,8 +419,8 @@ jobs:
           echo "✅ Optimization completed for phase: ${{ matrix.optimization_phase }}"
           
           # ファイルサイズ比較
-          if [ -f "${{ env.TARGET_FOLDER }}/index.html" ]; then
-            ORIGINAL_SIZE=$(stat -c%s "${{ env.TARGET_FOLDER }}/index.html")
+          if [ -f "index.html" ]; then
+            ORIGINAL_SIZE=$(stat -c%s "index.html")
             OPTIMIZED_SIZE=$(stat -c%s "${{ env.OUTPUT_FOLDER }}/index.html")
             REDUCTION=$(echo "scale=2; ($ORIGINAL_SIZE - $OPTIMIZED_SIZE) / $ORIGINAL_SIZE * 100" | bc)
             echo "📊 Size reduction: ${REDUCTION}%"
@@ -432,7 +467,7 @@ jobs:
           };
         }
         
-        const originalPath = process.env.TARGET_FOLDER + '/index.html';
+        const originalPath = 'index.html';  // ルートディレクトリ
         const optimizedPath = process.env.OUTPUT_FOLDER + '/index.html';
         
         if (fs.existsSync(originalPath) && fs.existsSync(optimizedPath)) {
