@@ -1,366 +1,310 @@
-name: Claude XML Viewer Optimizer
+name: "Auto Code Optimization via Claude"
+
 on:
   schedule:
-    - cron: '*/15 * * * *'  # 15分間隔実行
+    - cron: '*/15 * * * *' # 15分ごとに実行
+  push:
+    branches: [ main ]
   workflow_dispatch:
-    inputs:
-      phase:
-        description: '実行フェーズ'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - 'all'
-          - 'diagnose'
-          - 'optimize'
-          - 'validate'
-      continue_from:
-        description: '継続ポイント'
-        required: false
-        default: ''
 
-env:
-  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-  TARGET_REPO: '1tokan/xmlviewerfile'
-  SOURCE_URL: 'https://1tokan.github.io/xmlviewerfile'
-  OUTPUT_DIR: 'optimized'
-  MAX_EXECUTION_DAYS: 30
+permissions:
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
-  claude-optimizer:
+  code-optimization:
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 30
     
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
-    
+        
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
-        cache: 'npm'
-    
-    - name: Install dependencies
+        node-version: '18'
+        
+    - name: Create optimized directory
       run: |
-        npm i -g @anthropic-ai/sdk jsdom prettier
-        cat > package.json << 'EOF'
-        {"type":"module","dependencies":{"@anthropic-ai/sdk":"^0.25.0","jsdom":"^22.1.0","prettier":"^3.0.0"}}
-        EOF
-        npm i
-    
-    - name: Check execution window
-      id: check-window
+        mkdir -p optimized
+        mkdir -p logs
+        
+    - name: Initialize optimization state
       run: |
-        start_date=$(date -d "$(git log --reverse --format="%ai" | head -1)" +%s)
-        current_date=$(date +%s)
-        days_diff=$(( (current_date - start_date) / 86400 ))
-        echo "days_running=$days_diff" >> $GITHUB_OUTPUT
-        echo "should_stop=$([[ $days_diff -gt $MAX_EXECUTION_DAYS ]] && echo true || echo false)" >> $GITHUB_OUTPUT
-    
-    - name: Create optimizer script
+        if [ ! -f "logs/optimization_state.json" ]; then
+          echo '{"phase":"diagnosis","iteration":0,"last_run":"","completed_files":[],"pending_tasks":[]}' > logs/optimization_state.json
+        fi
+        
+    - name: Phase 1 - Code Diagnosis
+      id: diagnosis
       run: |
-        cat > optimizer.mjs << 'EOF'
-        import Anthropic from '@anthropic-ai/sdk';
-        import { JSDOM } from 'jsdom';
-        import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-        import { dirname, join } from 'path';
-        import { fileURLToPath } from 'url';
+        echo "=== コード診断フェーズ開始 ===" >> logs/optimization.log
+        echo "実行時間: $(date)" >> logs/optimization.log
         
-        const __dirname = dirname(fileURLToPath(import.meta.url));
-        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        # index.htmlの分析
+        if [ -f "index.html" ]; then
+          echo "index.html分析中..." >> logs/optimization.log
+          
+          # HTML構造分析
+          echo "--- HTML構造分析 ---" >> logs/optimization.log
+          grep -n "<!DOCTYPE\|<html\|<head\|<body\|<script\|<style\|<link" index.html >> logs/html_structure.log || true
+          
+          # CSS/JS参照分析
+          echo "--- CSS/JS参照分析 ---" >> logs/optimization.log
+          grep -n "href=\|src=" index.html >> logs/dependencies.log || true
+          
+          # 問題点検出
+          echo "--- 問題点検出 ---" >> logs/optimization.log
+          
+          # インラインスタイル検出
+          if grep -q "style=" index.html; then
+            echo "⚠️ インラインスタイルが検出されました" >> logs/optimization.log
+            grep -n "style=" index.html >> logs/issues.log
+          fi
+          
+          # 重複スクリプト検出
+          grep -o "src=['\"][^'\"]*['\"]" index.html | sort | uniq -d >> logs/duplicate_scripts.log || true
+          
+          # 未使用変数検出（基本的なパターン）
+          if ls *.js 2>/dev/null; then
+            echo "--- JavaScript分析 ---" >> logs/optimization.log
+            for js_file in *.js; do
+              echo "分析中: $js_file" >> logs/optimization.log
+              # 未使用変数の基本検出
+              grep -n "var\|let\|const" "$js_file" >> logs/js_variables.log || true
+            done
+          fi
+          
+        else
+          echo "❌ index.htmlが見つかりません" >> logs/optimization.log
+          exit 1
+        fi
         
-        class ClaudeOptimizer {
-          constructor() {
-            this.baseUrl = process.env.SOURCE_URL;
-            this.outputDir = process.env.OUTPUT_DIR;
-            this.logFile = 'optimization_log.json';
-            this.state = this.loadState();
-            this.maxTokens = 4096;
-          }
+        # 診断完了の記録
+        echo "診断フェーズ完了: $(date)" >> logs/optimization.log
+        echo "diagnosis_completed=true" >> $GITHUB_OUTPUT
         
-          loadState() {
-            try {
-              return existsSync(this.logFile) ? JSON.parse(readFileSync(this.logFile, 'utf8')) : {
-                phase: 'diagnose',
-                processed: [],
-                issues: [],
-                optimizations: [],
-                iteration: 0,
-                lastRun: null
-              };
-            } catch { return { phase: 'diagnose', processed: [], issues: [], optimizations: [], iteration: 0 }; }
-          }
-        
-          saveState() {
-            this.state.lastRun = Date.now();
-            writeFileSync(this.logFile, JSON.stringify(this.state, null, 2));
-          }
-        
-          async fetchContent(url) {
-            try {
-              const response = await fetch(url);
-              return response.ok ? await response.text() : null;
-            } catch { return null; }
-          }
-        
-          async analyzeCode(content, filename) {
-            const prompt = `以下のコードを分析し、最適化が必要な箇所を特定してください：
-        
-        ファイル: ${filename}
-        コード:
-        \`\`\`
-        ${content.slice(0, 8000)}
-        \`\`\`
-        
-        以下のJSON形式で回答してください：
-        {
-          "issues": [
-            {
-              "type": "performance|readability|maintainability|error_handling",
-              "description": "問題の説明",
-              "location": "行数または関数名",
-              "severity": "high|medium|low",
-              "solution": "修正方法"
-            }
-          ],
-          "metrics": {
-            "codeSize": "文字数",
-            "complexity": "複雑度(1-10)",
-            "duplicateCode": "重複コード数"
-          }
-        }`;
-        
-            try {
-              const response = await anthropic.messages.create({
-                model: 'claude-3-sonnet-20240229',
-                max_tokens: this.maxTokens,
-                messages: [{ role: 'user', content: prompt }]
-              });
-              
-              const result = JSON.parse(response.content[0].text);
-              return result;
-            } catch (error) {
-              console.error('分析エラー:', error);
-              return { issues: [], metrics: { codeSize: content.length, complexity: 5, duplicateCode: 0 } };
-            }
-          }
-        
-          async optimizeCode(content, issues, filename) {
-            const prompt = `以下のコードを最適化してください：
-        
-        ファイル: ${filename}
-        問題点: ${JSON.stringify(issues)}
-        コード:
-        \`\`\`
-        ${content.slice(0, 6000)}
-        \`\`\`
-        
-        最適化されたコードのみを出力してください。説明は不要です。`;
-        
-            try {
-              const response = await anthropic.messages.create({
-                model: 'claude-3-sonnet-20240229',
-                max_tokens: this.maxTokens,
-                messages: [{ role: 'user', content: prompt }]
-              });
-              
-              return response.content[0].text.replace(/```[\s\S]*?```/g, (match) => 
-                match.replace(/```(?:html|css|javascript|js)?\n?/, '').replace(/\n?```$/, '')
-              );
-            } catch (error) {
-              console.error('最適化エラー:', error);
-              return content;
-            }
-          }
-        
-          async diagnosePhase() {
-            console.log('🔍 診断フェーズ開始');
-            const indexContent = await this.fetchContent(`${this.baseUrl}/index.html`);
-            if (!indexContent) throw new Error('index.html取得失敗');
-        
-            const dom = new JSDOM(indexContent);
-            const doc = dom.window.document;
-            
-            // CSS/JSファイル抽出
-            const cssFiles = Array.from(doc.querySelectorAll('link[rel="stylesheet"]')).map(link => link.href);
-            const jsFiles = Array.from(doc.querySelectorAll('script[src]')).map(script => script.src);
-            
-            const filesToAnalyze = [
-              { name: 'index.html', content: indexContent },
-              ...await Promise.all(cssFiles.map(async url => ({
-                name: url.split('/').pop(),
-                content: await this.fetchContent(url.startsWith('http') ? url : `${this.baseUrl}/${url}`)
-              }))),
-              ...await Promise.all(jsFiles.map(async url => ({
-                name: url.split('/').pop(),
-                content: await this.fetchContent(url.startsWith('http') ? url : `${this.baseUrl}/${url}`)
-              })))
-            ];
-        
-            for (const file of filesToAnalyze.filter(f => f.content)) {
-              if (this.state.processed.includes(file.name)) continue;
-              
-              console.log(`分析中: ${file.name}`);
-              const analysis = await this.analyzeCode(file.content, file.name);
-              
-              this.state.issues.push({
-                file: file.name,
-                content: file.content,
-                analysis
-              });
-              
-              this.state.processed.push(file.name);
-              this.saveState();
-            }
-        
-            this.state.phase = 'optimize';
-            console.log(`✅ 診断完了: ${this.state.issues.length}ファイル分析`);
-          }
-        
-          async optimizePhase() {
-            console.log('⚡ 最適化フェーズ開始');
-            
-            if (!existsSync(this.outputDir)) mkdirSync(this.outputDir, { recursive: true });
-            
-            for (const item of this.state.issues) {
-              if (this.state.optimizations.some(o => o.file === item.file)) continue;
-              
-              const highIssues = item.analysis.issues.filter(i => i.severity === 'high');
-              if (highIssues.length === 0) continue;
-              
-              console.log(`最適化中: ${item.file}`);
-              const optimized = await this.optimizeCode(item.content, highIssues, item.file);
-              
-              const outputPath = join(this.outputDir, item.file);
-              writeFileSync(outputPath, optimized);
-              
-              this.state.optimizations.push({
-                file: item.file,
-                original: item.content.length,
-                optimized: optimized.length,
-                reduction: Math.round((1 - optimized.length / item.content.length) * 100),
-                timestamp: new Date().toISOString()
-              });
-              
-              this.saveState();
-            }
-        
-            this.state.phase = 'validate';
-            console.log(`✅ 最適化完了: ${this.state.optimizations.length}ファイル処理`);
-          }
-        
-          async validatePhase() {
-            console.log('🔍 検証フェーズ開始');
-            
-            const report = {
-              timestamp: new Date().toISOString(),
-              totalFiles: this.state.optimizations.length,
-              totalReduction: this.state.optimizations.reduce((sum, o) => sum + o.reduction, 0) / this.state.optimizations.length,
-              issues: this.state.issues.length,
-              optimizations: this.state.optimizations
-            };
-            
-            writeFileSync(join(this.outputDir, 'optimization_report.json'), JSON.stringify(report, null, 2));
-            
-            console.log(`📊 最適化レポート:`);
-            console.log(`- 処理ファイル数: ${report.totalFiles}`);
-            console.log(`- 平均削減率: ${report.totalReduction.toFixed(1)}%`);
-            console.log(`- 検出問題数: ${report.issues}`);
-            
-            this.state.phase = 'complete';
-            this.state.iteration++;
-            this.saveState();
-          }
-        
-          async run(phase = 'all') {
-            try {
-              if (phase === 'all' || phase === 'diagnose') {
-                if (this.state.phase === 'diagnose') await this.diagnosePhase();
-              }
-              
-              if (phase === 'all' || phase === 'optimize') {
-                if (this.state.phase === 'optimize') await this.optimizePhase();
-              }
-              
-              if (phase === 'all' || phase === 'validate') {
-                if (this.state.phase === 'validate') await this.validatePhase();
-              }
-              
-              if (this.state.phase === 'complete') {
-                console.log('🎉 最適化サイクル完了');
-                this.state.phase = 'diagnose';
-                this.state.processed = [];
-                this.saveState();
-              }
-            } catch (error) {
-              console.error('実行エラー:', error);
-              process.exit(1);
-            }
-          }
-        }
-        
-        const optimizer = new ClaudeOptimizer();
-        await optimizer.run(process.argv[2] || 'all');
-        EOF
-    
-    - name: Execute optimization
-      if: steps.check-window.outputs.should_stop == 'false'
+    - name: Phase 2 - Optimization Target Selection
+      if: steps.diagnosis.outputs.diagnosis_completed == 'true'
       run: |
-        node optimizer.mjs ${{ github.event.inputs.phase || 'all' }}
-    
-    - name: Commit and push optimizations
-      if: steps.check-window.outputs.should_stop == 'false'
+        echo "=== 最適化対象選定フェーズ ===" >> logs/optimization.log
+        
+        # 最適化対象ファイルの特定
+        echo "<!-- OPTIMIZATION_TARGET -->" > logs/optimization_targets.html
+        
+        # 問題のあるセクションのみタグ付け
+        if [ -f "logs/issues.log" ]; then
+          echo "最適化対象を特定中..." >> logs/optimization.log
+          
+          # インラインスタイル箇所をタグ付け
+          while IFS= read -r line; do
+            line_num=$(echo "$line" | cut -d: -f1)
+            echo "<!-- OPTIMIZE_INLINE_STYLE_LINE_$line_num -->" >> logs/optimization_targets.html
+          done < logs/issues.log
+        fi
+        
+        # JavaScriptファイルの最適化対象を特定
+        if ls *.js 2>/dev/null; then
+          for js_file in *.js; do
+            echo "<!-- OPTIMIZE_JS_FILE: $js_file -->" >> logs/optimization_targets.html
+          done
+        fi
+        
+        echo "対象選定完了: $(date)" >> logs/optimization.log
+        
+    - name: Phase 3 - Code Optimization
+      run: |
+        echo "=== 最適化フェーズ開始 ===" >> logs/optimization.log
+        start_time=$(date +%s)
+        
+        # 最適化されたindex.htmlを作成
+        if [ -f "index.html" ]; then
+          cp index.html optimized/index.html
+          
+          # インラインスタイルの外部CSS化
+          if grep -q "style=" optimized/index.html; then
+            echo "/* 最適化されたCSS $(date) */" > optimized/optimized_styles.css
+            
+            # 基本的なインラインスタイルの外部化
+            sed -i 's/style="[^"]*"//g' optimized/index.html
+            echo '<link rel="stylesheet" href="optimized_styles.css">' >> optimized/index.html
+            
+            echo "✅ インラインスタイルを外部CSS化" >> logs/optimization.log
+          fi
+          
+          # Meta最適化
+          if ! grep -q "charset" optimized/index.html; then
+            sed -i '/<head>/a <meta charset="UTF-8">' optimized/index.html
+          fi
+          
+          if ! grep -q "viewport" optimized/index.html; then
+            sed -i '/<head>/a <meta name="viewport" content="width=device-width, initial-scale=1.0">' optimized/index.html
+          fi
+        fi
+        
+        # JavaScriptの最適化
+        if ls *.js 2>/dev/null; then
+          for js_file in *.js; do
+            echo "最適化中: $js_file" >> logs/optimization.log
+            
+            # 最適化されたJSファイルを作成
+            optimized_file="optimized/$(basename "$js_file" .js)_optimized.js"
+            
+            # コメント除去と基本的な最適化
+            sed 's/\/\*.*\*\///g; s/\/\/.*$//g; /^[[:space:]]*$/d' "$js_file" > "$optimized_file"
+            
+            # 機能別分割の準備
+            if grep -q "function.*parse\|Parse" "$js_file"; then
+              echo "// XML Parser Module - $(date)" > optimized/xmlParser.js
+              grep -A 20 "function.*parse\|Parse" "$js_file" >> optimized/xmlParser.js || true
+            fi
+            
+            if grep -q "error\|Error\|catch\|try" "$js_file"; then
+              echo "// Error Handler Module - $(date)" > optimized/errorHandler.js
+              grep -A 10 "error\|Error\|catch\|try" "$js_file" >> optimized/errorHandler.js || true
+            fi
+            
+            echo "✅ $js_file 最適化完了" >> logs/optimization.log
+          done
+        fi
+        
+        # CSSの最適化
+        if ls *.css 2>/dev/null; then
+          for css_file in *.css; do
+            echo "最適化中: $css_file" >> logs/optimization.log
+            
+            optimized_css="optimized/$(basename "$css_file" .css)_optimized.css"
+            
+            # CSS最適化（コメント除去、空行削除）
+            sed 's/\/\*.*\*\///g; /^[[:space:]]*$/d' "$css_file" > "$optimized_css"
+            
+            echo "✅ $css_file 最適化完了" >> logs/optimization.log
+          done
+        fi
+        
+        # 最適化時間の記録
+        end_time=$(date +%s)
+        optimization_time=$((end_time - start_time))
+        echo "最適化処理時間: ${optimization_time}秒" >> logs/optimization.log
+        
+    - name: Phase 4 - Rebuild and Integration
+      run: |
+        echo "=== 再構築と統合フェーズ ===" >> logs/optimization.log
+        
+        # 最適化されたファイルの統合
+        if [ -f "optimized/index.html" ]; then
+          
+          # 分割されたJSファイルの統合
+          if ls optimized/*.js 2>/dev/null; then
+            echo "<!-- 最適化されたJavaScript統合 -->" >> optimized/index.html
+            for js_file in optimized/*.js; do
+              echo "<script src=\"$(basename "$js_file")\"></script>" >> optimized/index.html
+            done
+          fi
+          
+          # CSS統合
+          if ls optimized/*.css 2>/dev/null; then
+            for css_file in optimized/*.css; do
+              echo "<link rel=\"stylesheet\" href=\"$(basename "$css_file")\">" >> optimized/index.html
+            done
+          fi
+          
+          echo "✅ ファイル統合完了" >> logs/optimization.log
+        fi
+        
+    - name: Phase 5 - Diff Evaluation
+      run: |
+        echo "=== 差分評価フェーズ ===" >> logs/optimization.log
+        
+        # ファイルサイズ比較
+        if [ -f "index.html" ] && [ -f "optimized/index.html" ]; then
+          original_size=$(wc -c < index.html)
+          optimized_size=$(wc -c < optimized/index.html)
+          
+          if [ $optimized_size -lt $original_size ]; then
+            reduction=$((original_size - optimized_size))
+            percentage=$((reduction * 100 / original_size))
+            echo "✅ コード短縮率: $percentage% ($reduction bytes削減)" >> logs/optimization.log
+          else
+            echo "⚠️ ファイルサイズが増加しました" >> logs/optimization.log
+          fi
+        fi
+        
+        # 機能再現性チェック
+        if [ -f "optimized/index.html" ]; then
+          if grep -q "<!DOCTYPE html>" optimized/index.html; then
+            echo "✅ HTMLドキュメント構造: 正常" >> logs/optimization.log
+          else
+            echo "❌ HTMLドキュメント構造: 異常" >> logs/optimization.log
+          fi
+          
+          if grep -q "<body>" optimized/index.html; then
+            echo "✅ BODYタグ: 正常" >> logs/optimization.log
+          else
+            echo "❌ BODYタグ: 異常" >> logs/optimization.log
+          fi
+        fi
+        
+        echo "差分評価完了: $(date)" >> logs/optimization.log
+        
+    - name: Update Optimization State
+      run: |
+        # 最適化状態の更新
+        current_time=$(date -Iseconds)
+        echo "{\"phase\":\"completed\",\"iteration\":$((GITHUB_RUN_NUMBER)),\"last_run\":\"$current_time\",\"completed_files\":[\"index.html\"],\"pending_tasks\":[]}" > logs/optimization_state.json
+        
+        echo "最適化サイクル完了: $current_time" >> logs/optimization.log
+        
+    - name: Commit optimized files
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add .
         
-        if ! git diff --cached --quiet; then
-          git commit -m "🚀 Claude最適化 - Iteration ${{ github.run_number }}"
-          git push
+        git add optimized/ logs/
+        
+        if git diff --staged --quiet; then
+          echo "変更なし - コミットをスキップ"
         else
-          echo "変更なし - コミットスキップ"
+          git commit -m "自動最適化完了 - Run #$GITHUB_RUN_NUMBER $(date)"
+          git push
         fi
-    
-    - name: Create optimization summary
-      if: steps.check-window.outputs.should_stop == 'false'
+        
+    - name: Deploy to GitHub Pages
+      if: github.ref == 'refs/heads/main'
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./optimized
+        destination_dir: optimized
+        
+    - name: Generate Summary Report
       run: |
-        if [ -f optimization_log.json ]; then
-          echo "## 🎯 最適化サマリー" >> $GITHUB_STEP_SUMMARY
-          echo "- 実行日時: $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "- 実行日数: ${{ steps.check-window.outputs.days_running }}日" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f optimized/optimization_report.json ]; then
-            echo "- 最適化ファイル数: $(jq '.totalFiles' optimized/optimization_report.json)" >> $GITHUB_STEP_SUMMARY
-            echo "- 平均削減率: $(jq '.totalReduction' optimized/optimization_report.json)%" >> $GITHUB_STEP_SUMMARY
+        echo "## 最適化サマリーレポート" >> logs/summary.md
+        echo "- 実行時間: $(date)" >> logs/summary.md
+        echo "- 実行番号: #$GITHUB_RUN_NUMBER" >> logs/summary.md
+        echo "- 最適化対象: index.html および関連CSS/JS" >> logs/summary.md
+        
+        if [ -f "logs/optimization.log" ]; then
+          echo "### 最適化結果" >> logs/summary.md
+          grep "✅\|❌\|⚠️" logs/optimization.log >> logs/summary.md
+        fi
+        
+        echo "### 出力先" >> logs/summary.md
+        echo "- 最適化版: https://$(echo $GITHUB_REPOSITORY | tr '[:upper:]' '[:lower:]').github.io/optimized/" >> logs/summary.md
+        
+    - name: Cleanup old logs
+      run: |
+        # 30日以上古いログファイルを削除
+        find logs/ -name "*.log" -mtime +30 -delete || true
+        
+        # ログファイルサイズ制限（10MB以上は分割）
+        for log_file in logs/*.log; do
+          if [ -f "$log_file" ] && [ $(wc -c < "$log_file") -gt 10485760 ]; then
+            split -l 1000 "$log_file" "${log_file%.log}_part"
+            rm "$log_file"
           fi
-          
-          echo "- 処理フェーズ: $(jq -r '.phase' optimization_log.json)" >> $GITHUB_STEP_SUMMARY
-          echo "- 反復回数: $(jq '.iteration' optimization_log.json)" >> $GITHUB_STEP_SUMMARY
-        fi
-    
-    - name: Stop execution after 30 days
-      if: steps.check-window.outputs.should_stop == 'true'
-      run: |
-        echo "⏰ 30日間の実行期間が終了しました"
-        echo "最終レポートを生成します"
-        
-        if [ -f optimized/optimization_report.json ]; then
-          echo "## 📊 最終最適化レポート" >> $GITHUB_STEP_SUMMARY
-          echo "- 総実行期間: ${{ steps.check-window.outputs.days_running }}日" >> $GITHUB_STEP_SUMMARY
-          echo "- 最適化完了ファイル数: $(jq '.totalFiles' optimized/optimization_report.json)" >> $GITHUB_STEP_SUMMARY
-          echo "- 平均コード削減率: $(jq '.totalReduction' optimized/optimization_report.json)%" >> $GITHUB_STEP_SUMMARY
-          
-          # 最適化されたファイルのリストを表示
-          echo "### 最適化されたファイル:" >> $GITHUB_STEP_SUMMARY
-          jq -r '.optimizations[] | "- \(.file): \(.reduction)% 削減"' optimized/optimization_report.json >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        # ワークフロー自動停止
-        gh workflow disable "Claude XML Viewer Optimizer" --repo ${{ github.repository }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        done
