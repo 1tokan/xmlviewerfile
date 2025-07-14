@@ -36,10 +36,10 @@ jobs:
         # ANTHROPIC_API_KEY_GOTS_YAHOO
         if [ -n "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" ]; then
           echo "✅ ANTHROPIC_API_KEY_GOTS_YAHOO: 存在"
-          key_len=${#{{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}}
+          GOTS_KEY="${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"
+          key_len=${#GOTS_KEY}
           echo "   📏 長さ: $key_len文字"
-          echo "   🔤 開始: ${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" | head -c 15
-          echo "..."
+          echo "   🔤 開始: $(echo "$GOTS_KEY" | head -c 15)..."
         else
           echo "❌ ANTHROPIC_API_KEY_GOTS_YAHOO: 未設定"
         fi
@@ -47,10 +47,10 @@ jobs:
         # ANTHROPIC_API_KEY_NAOTO_G
         if [ -n "${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}" ]; then
           echo "✅ ANTHROPIC_API_KEY_NAOTO_G: 存在"
-          key_len=${#{{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}}
+          NAOTO_KEY="${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}"
+          key_len=${#NAOTO_KEY}
           echo "   📏 長さ: $key_len文字"
-          echo "   🔤 開始: ${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}" | head -c 15
-          echo "..."
+          echo "   🔤 開始: $(echo "$NAOTO_KEY" | head -c 15)..."
         else
           echo "❌ ANTHROPIC_API_KEY_NAOTO_G: 未設定"
         fi
