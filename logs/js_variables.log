@@ -1,0 +1,136 @@
+1:const axios = require('axios');
+2:const fs = require('fs-extra');
+3:const path = require('path');
+4:const cheerio = require('cheerio');
+7:  constructor() {
+15:    const headers = {
+21:    const data = {
+30:    for (let i = 0; i < this.maxRetries; i++) {
+32:        const response = await axios.post(this.baseUrl, data, { headers });
+47:    const prompt = `
+73:    const prompt = `
+93:    const prompt = `
+114:    const prompt = `
+136:    const prompt = `
+159:  constructor() {
+192:      const files = await fs.readdir(dir);
+201:      const stats = await fs.stat(filePath);
+210:  constructor() {
+216:    const timestamp = new Date().toISOString();
+217:    const logEntry = `[${timestamp}] ${message}\n`;
+223:    const reductionRate = ((originalSize - optimizedSize) / originalSize * 100).toFixed(2);
+224:    const message = `Optimized ${filename}: ${originalSize}B → ${optimizedSize}B (${reductionRate}% reduction) in ${processingTime}ms`;
+229:    const message = `Summary: ${totalFiles} files optimized, ${totalReduction}B total reduction in ${totalTime}ms`;
+235:  const optimizer = new ClaudeOptimizer();
+236:  const fileManager = new FileManager();
+237:  const logger = new OptimizationLogger();
+245:    const htmlPath = path.join(fileManager.targetFolder, fileManager.viewerFile);
+246:    const htmlContent = await fileManager.readFile(htmlPath);
+254:    const cssFiles = await fileManager.getFileList(fileManager.targetFolder, '.css');
+255:    const optimizedCssFiles = [];
+257:    for (const cssFile of cssFiles) {
+258:      const startTime = Date.now();
+259:      const cssPath = path.join(fileManager.targetFolder, cssFile);
+260:      const cssContent = await fileManager.readFile(cssPath);
+263:        const originalSize = await fileManager.getFileSize(cssPath);
+264:        const optimizedCSS = await optimizer.optimizeCSS(cssContent, cssFile);
+265:        const outputPath = path.join(fileManager.outputFolder, 'css', cssFile);
+268:        const optimizedSize = await fileManager.getFileSize(outputPath);
+269:        const processingTime = Date.now() - startTime;
+277:    const jsFiles = await fileManager.getFileList(fileManager.targetFolder, '.js');
+278:    const optimizedJsFiles = [];
+280:    for (const jsFile of jsFiles) {
+281:      const startTime = Date.now();
+282:      const jsPath = path.join(fileManager.targetFolder, jsFile);
+283:      const jsContent = await fileManager.readFile(jsPath);
+286:        const originalSize = await fileManager.getFileSize(jsPath);
+287:        const optimizedJS = await optimizer.optimizeJS(jsContent, jsFile);
+291:          const splitResult = await optimizer.splitJavaScript(jsContent, jsFile);
+292:          const splitFiles = splitResult.split('// === ').filter(part => part.trim());
+294:          for (const splitFile of splitFiles) {
+295:            const lines = splitFile.split('\n');
+296:            const filename = lines[0].replace(' ===', '');
+297:            const code = lines.slice(1).join('\n');
+299:            const outputPath = path.join(fileManager.outputFolder, 'js', filename);
+304:          const outputPath = path.join(fileManager.outputFolder, 'js', jsFile);
+309:        const processingTime = Date.now() - startTime;
+315:    const optimizedHTML = await optimizer.optimizeHTML(htmlContent, optimizedCssFiles, optimizedJsFiles);
+316:    const optimizedHtmlPath = path.join(fileManager.outputFolder, fileManager.viewerFile);
+320:    const evaluation = await optimizer.analyzeAndCompare(htmlPath, optimizedHtmlPath);
+327:      await logger.log('Optimization completed successfully');
+1:const $=s=>document.getElementById(s);
+4:const CFG={
+23:  constructor(){
+29:    const u=$('u'),i=$('i'),events=['dragenter','dragover','dragleave','drop'];
+46:      const xmls=[];
+48:        const p=(f.webkitRelativePath||f.name).toUpperCase();
+54:            const t=CFG.types.find(t=>p.includes(t+'/'));
+79:      const cfg=CFG.spec[t];
+82:      let x=await this.readText(f,'UTF-8');
+86:      const d=new DOMParser().parseFromString(x,'text/xml');
+90:        const files=i.querySelectorAll('オリジナルファイル情報');
+93:            const fn=this.getTag(o,cfg.f),jn=cfg.j?this.getTag(o,cfg.j):null;
+97:          const fn=this.getTag(i,cfg.f);
+106:      let x=await this.readText(f,'UTF-8');
+110:      const d=new DOMParser().parseFromString(x,'text/xml');
+114:        const folderName=this.getTag(folder,'その他サブフォルダ日本語名');
+117:          const fileInfo=item.querySelector('オリジナルファイル情報');
+119:            const filename=this.getTag(fileInfo,'オリジナルファイル名');
+120:            const japaneseName=this.getTag(fileInfo,'オリジナルファイル日本語名');
+121:            const title=this.getTag(item,'資料名');
+122:            const serial=this.getTag(fileInfo,'シリアル番号');
+125:              const obj={
+146:      let x=await this.readText(f,'UTF-8');
+150:      const d=new DOMParser().parseFromString(x,'text/xml');
+166:    const m=d.match(/(\d{4})(\d{2})(\d{2})/);
+172:    const o={filename:fn,type:t};
+176:      const v=this.getTag(i,tag);
+187:      const reader=new FileReader();
+195:    const found=elem?.querySelector(tagName);
+201:      const files=this.filterFiles(type,CFG.patterns[i]);
+211:    const files=[];
+212:    for(let[path,file] of this.M){
+214:        const name=path.split('/').pop();
+222:    const cats=new Map();
+224:      const name=f.name,info=this.X.get(name)||this.X.get(name.toUpperCase())||this.X.get(name.toLowerCase())||{category:'未分類',division:'その他',title:name,filename:name};
+225:      const cat=info.category||'未分類',div=info.division||'その他',title=info.title||name;
+240:    const folders=new Map();
+243:      const info=this.X.get(f.name)||this.X.get(f.name.toUpperCase())||this.X.get(f.name.toLowerCase());
+246:        const folderName=info.folder||'その他';
+267:      const info=this.X.get(f.name)||this.X.get(f.name.toUpperCase())||this.X.get(f.name.toLowerCase());
+274:    const groups=new Map();
+276:      const baseType=key.startsWith('PHOTO_')?'PHOTO':key.startsWith('OTHRS_')?'OTHRS':folder.baseType||key;
+281:    let html='';
+286:          const catName=folder.key.split('_')[1];
+289:            const divKey=`${catName}|${division}`;
+292:              const titleKey=`${divKey}|${title}`;
+310:    const isExpanded=this.E.has(key);
+314:      this.E.delete(key);
+327:    const data=this.photoData.get(key);
+330:    const files=data.files;
+334:    let html='<div class="pg">';
+336:      const url=this.getURL(photo.file);
+347:    const folder=this.F.get(key);
+351:      const allFiles=[];
+356:      let html='<div class="pg">';
+358:        const url=this.getURL(photo.file);
+365:      const groups=new Map();
+367:        const info=f.info||{},title=info.title||'未分類';
+372:      const rows=Array.from(groups.values()).sort((a,b)=>a.title.localeCompare(b.title));
+373:      let html='<div class="tb"><table class="tbl"><thead><tr><th>日付</th><th>タイトル</th><th>ファイル</th></tr></thead><tbody>';
+377:          const displayName=f.info?.japaneseName||f.name;
+390:    const{name,type,content,startDate,endDate,contractor}=this.R,parts=[];
+398:      let elem=$('project-info');
+417:    const photo=this.P[index],info=photo.info;
+420:    const modal=$('mo'),content=modal.querySelector('.mc');
+423:    let html=`<div class="mt">${info.title}</div>`;
+433:    let infoElem=modal.querySelector('.photo-info');
+441:    const nav=document.querySelector('.mn'),[prev,next]=nav.children;
+453:      const file=this.M.get(path);
+456:      const url=this.getURL(file),win=window.open();
+464:    const modal=$('mo');
+466:    const content=modal.querySelector('.mc');
+468:    const photoInfo=modal.querySelector('.photo-info');
+474:    const bar=$('pb');
+482:    const div=document.createElement('div');
+493:    const projectInfo=$('project-info');
