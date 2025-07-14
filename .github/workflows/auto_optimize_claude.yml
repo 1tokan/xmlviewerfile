@@ -1,36 +1,166 @@
-name: Claude XML Viewer Optimizer
+name: Claude XML Viewer Optimizer Multi-Key
 on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+    inputs:
+      api_key_selection:
+        description: 'Select API Key'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - 'auto'
+          - 'ANTHROPIC_API_KEY_GOTS_YAHOO'
+          - 'ANTHROPIC_API_KEY_NAOTO_G'
   push:
     paths: ['index.html', '*.css', '*.js']
+
 env:
-  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   MAX_DAYS: 30
   TARGET_REPO: 1tokan/xmlviewerfile
   TEST_FOLDER: CALS_EC
+
 jobs:
+  api-key-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      working_key: ${{ steps.test-keys.outputs.working_key }}
+      test_results: ${{ steps.test-keys.outputs.test_results }}
+    steps:
+    - name: Test API Keys
+      id: test-keys
+      run: |
+        echo "🔑 APIキー接続テスト開始"
+        
+        # APIキーのテスト関数
+        test_api_key() {
+          local key_name=$1
+          local key_value=$2
+          
+          if [ -z "$key_value" ]; then
+            echo "❌ $key_name: 未設定"
+            return 1
+          fi
+          
+          echo "🔍 $key_name をテスト中..."
+          
+          # Anthropic APIへのテストリクエスト
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://api.anthropic.com/v1/messages" \
+            -H "Authorization: Bearer $key_value" \
+            -H "Content-Type: application/json" \
+            -H "anthropic-version: 2023-06-01" \
+            -d '{
+              "model": "claude-3-5-sonnet-20241022",
+              "max_tokens": 10,
+              "messages": [{"role": "user", "content": "test"}]
+            }' \
+            --connect-timeout 10 \
+            --max-time 30)
+          
+          if [ "$response" = "200" ]; then
+            echo "✅ $key_name: 接続成功"
+            return 0
+          else
+            echo "❌ $key_name: 接続失敗 (HTTP $response)"
+            return 1
+          fi
+        }
+        
+        # 結果保存用
+        test_results=""
+        working_key=""
+        
+        # 手動選択がある場合
+        if [ "${{ github.event.inputs.api_key_selection }}" != "auto" ] && [ -n "${{ github.event.inputs.api_key_selection }}" ]; then
+          selected_key="${{ github.event.inputs.api_key_selection }}"
+          echo "🎯 手動選択: $selected_key"
+          
+          case $selected_key in
+            "ANTHROPIC_API_KEY_GOTS_YAHOO")
+              if test_api_key "GOTS_YAHOO" "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"; then
+                working_key="ANTHROPIC_API_KEY_GOTS_YAHOO"
+                test_results="✅ GOTS_YAHOO: 手動選択・接続成功"
+              else
+                test_results="❌ GOTS_YAHOO: 手動選択・接続失敗"
+              fi
+              ;;
+            "ANTHROPIC_API_KEY_NAOTO_G")
+              if test_api_key "NAOTO_G" "${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}"; then
+                working_key="ANTHROPIC_API_KEY_NAOTO_G"
+                test_results="✅ NAOTO_G: 手動選択・接続成功"
+              else
+                test_results="❌ NAOTO_G: 手動選択・接続失敗"
+              fi
+              ;;
+          esac
+        else
+          # 自動選択：両方をテスト
+          echo "🔄 自動選択モード: 両方のAPIキーをテスト"
+          
+          # NAOTO_G を先にテスト
+          if test_api_key "NAOTO_G" "${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}"; then
+            working_key="ANTHROPIC_API_KEY_NAOTO_G"
+            test_results="${test_results}✅ NAOTO_G: 接続成功\n"
+          else
+            test_results="${test_results}❌ NAOTO_G: 接続失敗\n"
+          fi
+          
+          # GOTS_YAHOO をテスト
+          if test_api_key "GOTS_YAHOO" "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"; then
+            if [ -z "$working_key" ]; then
+              working_key="ANTHROPIC_API_KEY_GOTS_YAHOO"
+            fi
+            test_results="${test_results}✅ GOTS_YAHOO: 接続成功"
+          else
+            test_results="${test_results}❌ GOTS_YAHOO: 接続失敗"
+          fi
+        fi
+        
+        echo "working_key=$working_key" >> $GITHUB_OUTPUT
+        echo "test_results=$test_results" >> $GITHUB_OUTPUT
+        
+        if [ -z "$working_key" ]; then
+          echo "❌ 利用可能なAPIキーがありません"
+          exit 1
+        else
+          echo "✅ 使用予定APIキー: $working_key"
+        fi
+
   optimize:
+    needs: api-key-test
     runs-on: ubuntu-latest
     timeout-minutes: 14
+    env:
+      ANTHROPIC_API_KEY: ${{ needs.api-key-test.outputs.working_key == 'ANTHROPIC_API_KEY_NAOTO_G' && secrets.ANTHROPIC_API_KEY_NAOTO_G || secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}
+      SELECTED_KEY: ${{ needs.api-key-test.outputs.working_key }}
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
         token: ${{ secrets.GITHUB_TOKEN }}
+    
     - uses: actions/setup-node@v4
       with:
         node-version: '20'
         cache: 'npm'
+    
     - name: Time Guard
       run: |
         S=$(git log --format=%ct -n 1 -- .github/workflows/auto_optimize_claude.yml 2>/dev/null || echo $(date +%s))
         [ $(( ($(date +%s) - S) / 86400 )) -gt $MAX_DAYS ] && exit 1 || echo "✅ Time OK"
+    
     - name: Setup
       run: |
         npm init -y --type=module
         npm i axios cheerio fs-extra
+        
+        echo "🔑 APIキーテスト結果:"
+        echo -e "${{ needs.api-key-test.outputs.test_results }}"
+        echo "📋 選択されたAPIキー: $SELECTED_KEY"
+    
     - name: Generate Optimizer
       run: |
         cat > opt.js << 'EOF'
@@ -39,23 +169,33 @@ jobs:
         import fs from 'fs-extra';
         import path from 'path';
         
-        const API='https://api.anthropic.com/v1/messages',MODEL='claude-3-5-sonnet-20241022',MAX_TOKENS=8000,TEMP=0.1,RETRIES=3,TIMEOUT=25000;
+        const API='https://api.anthropic.com/v1/messages',MODEL='claude-3-5-sonnet-20241022',MAX_TOKENS=8000,TEMP=0.1,RETRIES=3,TIMEOUT=30000;
         const SYSTEM=`XML Viewer最適化専門家として、HTML/CSS/JS構造を段階的に分析・診断・最適化します。処理速度・仕様完全網羅・文字数最小化を重視し、問題点のみを特定・修正してください。`;
         
         class ClaudeOpt {
           constructor() {
             this.key = process.env.ANTHROPIC_API_KEY;
+            this.selectedKey = process.env.SELECTED_KEY || 'UNKNOWN';
             this.log = [];
             this.processed = new Set();
             this.outDir = 'optimized';
             this.baseUrl = 'https://1tokan.github.io/xmlviewerfile';
             this.testUrl = 'https://1tokan.github.io/CALS_EC';
+            
+            if (!this.key) {
+              throw new Error('❌ APIキーが設定されていません');
+            }
+            
+            console.log(`🔑 使用APIキー: ${this.selectedKey}`);
           }
         
           async claude(prompt, ctx = '') {
             const full = `${ctx}\n\n${prompt}`;
+            
             for (let i = 0; i < RETRIES; i++) {
               try {
+                console.log(`🤖 Claude API Call (${i + 1}/${RETRIES}) - Key: ${this.selectedKey}`);
+                
                 const res = await axios.post(API, {
                   model: MODEL,
                   max_tokens: MAX_TOKENS,
@@ -70,11 +210,25 @@ jobs:
                   },
                   timeout: TIMEOUT
                 });
+                
+                console.log(`✅ API成功 - トークン使用: ${res.data.usage?.output_tokens || 'N/A'}`);
                 return res.data.content[0].text;
+                
               } catch (e) {
-                console.log(`🔄 Retry ${i + 1}/${RETRIES}: ${e.message}`);
-                if (i === RETRIES - 1) throw e;
-                await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+                const status = e.response?.status || 'NETWORK';
+                const message = e.response?.data?.error?.message || e.message;
+                
+                console.log(`🔄 Retry ${i + 1}/${RETRIES}: ${status} - ${message}`);
+                
+                if (status === 401) {
+                  throw new Error(`❌ APIキー認証エラー (${this.selectedKey}): ${message}`);
+                }
+                
+                if (i === RETRIES - 1) {
+                  throw new Error(`❌ API呼び出し失敗 (${this.selectedKey}): ${message}`);
+                }
+                
+                await new Promise(r => setTimeout(r, 2000 * (i + 1)));
               }
             }
           }
@@ -84,7 +238,7 @@ jobs:
             const content = await fs.readFile(file, 'utf8');
             const ext = path.extname(file);
             
-            console.log(`📋 分析: ${file}`);
+            console.log(`📋 分析開始: ${file} (${this.selectedKey})`);
             
             const prompt = `
         ## 🔍 XML Viewer診断フェーズ
@@ -94,7 +248,7 @@ jobs:
         **用途:** ${this.testUrl}のXMLファイル読み込み表示
         
         \`\`\`${ext.slice(1)}
-        ${content}
+        ${content.slice(0, 45000)}${content.length > 45000 ? '\n... (truncated)' : ''}
         \`\`\`
         
         **診断観点:**
@@ -120,10 +274,12 @@ jobs:
               phase: 'analyze',
               file,
               time,
-              result,
+              result: result.slice(0, 1000),
+              apiKey: this.selectedKey,
               timestamp: new Date().toISOString()
             });
             
+            console.log(`✅ 分析完了: ${file} (${time}ms)`);
             return result;
           }
         
@@ -132,17 +288,17 @@ jobs:
             const content = await fs.readFile(file, 'utf8');
             const ext = path.extname(file);
             
-            console.log(`⚡ 最適化: ${file}`);
+            console.log(`⚡ 最適化開始: ${file} (${this.selectedKey})`);
             
             const prompt = `
         ## 🚀 最適化フェーズ
         
         **分析結果:**
-        ${analysis}
+        ${analysis.slice(0, 2000)}
         
         **元コード:**
         \`\`\`${ext.slice(1)}
-        ${content}
+        ${content.slice(0, 40000)}${content.length > 40000 ? '\n... (truncated)' : ''}
         \`\`\`
         
         **最適化要件:**
@@ -168,10 +324,12 @@ jobs:
               phase: 'optimize',
               file,
               time,
-              result,
+              result: result.slice(0, 1000),
+              apiKey: this.selectedKey,
               timestamp: new Date().toISOString()
             });
             
+            console.log(`✅ 最適化完了: ${file} (${time}ms)`);
             return result;
           }
         
@@ -193,14 +351,14 @@ jobs:
               const end = Math.min(start + max, content.length);
               parts.push({
                 name: `${base}_part${i + 1}of${chunks}`,
-                content: `/* 🤖 Claude最適化 Part ${i + 1}/${chunks} */\n${content.slice(start, end)}`
+                content: `/* 🤖 Claude最適化 (${this.selectedKey}) Part ${i + 1}/${chunks} */\n${content.slice(start, end)}`
               });
             }
             return parts;
           }
         
           async validate(orig, opt) {
-            console.log(`🔍 検証: ${orig} vs ${opt}`);
+            console.log(`🔍 検証開始: ${orig} vs ${opt} (${this.selectedKey})`);
             
             const prompt = `
         ## 🧪 差分評価・検証フェーズ
@@ -229,11 +387,15 @@ jobs:
               phase: 'validate',
               orig,
               opt,
-              result,
+              result: result.slice(0, 500),
+              apiKey: this.selectedKey,
               timestamp: new Date().toISOString()
             });
             
-            return result.includes('✅') || result.includes('合格');
+            const isValid = result.includes('✅') || result.includes('合格');
+            console.log(`${isValid ? '✅' : '❌'} 検証結果: ${orig}`);
+            
+            return isValid;
           }
         
           async process(file) {
@@ -255,7 +417,7 @@ jobs:
               const code = this.extractCode(optimized);
               
               if (!code) {
-                console.log(`❌ 最適化失敗: ${file}`);
+                console.log(`❌ コード抽出失敗: ${file}`);
                 return;
               }
               
@@ -277,7 +439,7 @@ jobs:
               const valid = await this.validate(file, outPath);
               
               if (valid) {
-                console.log(`✅ 完了: ${file}`);
+                console.log(`✅ 処理完了: ${file}`);
                 this.processed.add(file);
               } else {
                 console.log(`❌ 検証失敗: ${file}`);
@@ -285,18 +447,19 @@ jobs:
               }
               
             } catch (e) {
-              console.error(`❌ Error: ${file}`, e.message);
+              console.error(`❌ 処理エラー: ${file}`, e.message);
               this.log.push({
                 phase: 'error',
                 file,
                 error: e.message,
+                apiKey: this.selectedKey,
                 timestamp: new Date().toISOString()
               });
             }
           }
         
           async run() {
-            console.log('🚀 Claude XML Viewer Optimizer v2.0');
+            console.log(`🚀 Claude XML Viewer Optimizer v2.1 (${this.selectedKey})`);
             
             const files = ['index.html'];
             
@@ -307,10 +470,10 @@ jobs:
                 ...all.filter(f => f.endsWith('.js') && f !== 'opt.js')
               );
             } catch (e) {
-              console.error('File scan error:', e.message);
+              console.error('ファイルスキャンエラー:', e.message);
             }
             
-            console.log(`📁 対象: ${files.join(', ')}`);
+            console.log(`📁 処理対象: ${files.join(', ')}`);
             
             for (const file of files) {
               try {
@@ -318,17 +481,18 @@ jobs:
                   await this.process(file);
                 }
               } catch (e) {
-                console.error(`Process error: ${file}`, e.message);
+                console.error(`ファイル処理エラー: ${file}`, e.message);
               }
             }
             
             await this.report();
-            console.log('🎉 最適化完了');
+            console.log(`🎉 最適化完了 (${this.selectedKey})`);
           }
         
           async report() {
             const report = {
               timestamp: new Date().toISOString(),
+              apiKey: this.selectedKey,
               target: this.baseUrl,
               testFolder: this.testUrl,
               totalFiles: this.processed.size,
@@ -338,21 +502,26 @@ jobs:
                 totalTime: this.log.reduce((s, l) => s + (l.time || 0), 0),
                 successCount: this.log.filter(l => l.phase === 'validate' && l.result.includes('✅')).length,
                 errorCount: this.log.filter(l => l.phase === 'error').length,
-                compressionRate: this.log.filter(l => l.phase === 'optimize').length > 0 ? '計算中' : '0%'
+                compressionRate: this.log.filter(l => l.phase === 'optimize').length > 0 ? '計算中' : '0%',
+                apiCalls: this.log.length,
+                averageResponseTime: this.log.length > 0 ? Math.round(this.log.reduce((s, l) => s + (l.time || 0), 0) / this.log.length) : 0
               }
             };
             
             await fs.writeFile('optimization_report.json', JSON.stringify(report, null, 2));
-            console.log('📊 Report: optimization_report.json');
+            console.log(`📊 レポート生成: optimization_report.json (${this.selectedKey})`);
           }
         }
         
         new ClaudeOpt().run().catch(console.error);
         EOF
+    
     - name: Execute Optimization
       run: |
+        echo "⚡ 最適化実行開始 (APIキー: $SELECTED_KEY)"
         node opt.js
         echo "🔄 最適化実行完了"
+    
     - name: Deploy Results
       run: |
         git config --local user.email "claude@optimizer.ai"
@@ -364,15 +533,18 @@ jobs:
           COUNT=$(find optimized/ -type f | wc -l)
           SIZE=$(du -sh optimized/ | cut -f1)
           
-          git commit -m "🚀 Claude最適化実行 [$(date '+%m/%d %H:%M')]
+          git commit -m "🚀 Claude最適化実行 [$SELECTED_KEY] [$(date '+%m/%d %H:%M')]
           
           📊 処理結果:
+          - 使用APIキー: $SELECTED_KEY
           - 最適化ファイル: ${COUNT}個 (${SIZE})
           - 対象サイト: https://1tokan.github.io/xmlviewerfile
           - テストフォルダ: https://1tokan.github.io/CALS_EC
           - 詳細レポート: optimization_report.json
           
           🎯 最適化観点: 速度向上・コード圧縮・エラー処理・保守性
+          🔑 APIキーテスト結果:
+          ${{ needs.api-key-test.outputs.test_results }}
           
           [skip ci]"
           
@@ -381,8 +553,15 @@ jobs:
         else
           echo "ℹ️ 最適化対象なし"
         fi
+    
     - name: Status Report
       run: |
+        echo "🔑 APIキー使用状況:"
+        echo "- 選択されたキー: $SELECTED_KEY"
+        echo "- テスト結果:"
+        echo -e "${{ needs.api-key-test.outputs.test_results }}"
+        echo ""
+        
         if [ -f "optimization_report.json" ]; then
           echo "📋 最適化サマリー:"
           cat optimization_report.json | jq -r '.summary | to_entries[] | "\(.key): \(.value)"'
@@ -396,6 +575,7 @@ jobs:
         echo "- メイン: https://1tokan.github.io/xmlviewerfile"
         echo "- 最適化版: https://1tokan.github.io/optimized"
         echo "- テスト用XML: https://1tokan.github.io/CALS_EC"
+    
     - name: Cleanup
       run: |
         find optimized/ -type f -mtime +7 -delete 2>/dev/null || true
