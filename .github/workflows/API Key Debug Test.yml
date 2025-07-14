@@ -153,43 +153,42 @@ jobs:
             case $response in
               200)
                 echo "   ✅ 成功: APIキーは有効です"
-                return 0
                 ;;
               401)
                 echo "   ❌ 認証エラー: APIキーが無効または期限切れです"
-                return 1
                 ;;
               403)
                 echo "   ❌ アクセス拒否: 権限が不足しています"
-                return 1
                 ;;
               429)
                 echo "   ⚠️ レート制限: 一時的に制限されています"
-                return 1
                 ;;
               *)
                 echo "   ❌ 予期しないエラー: HTTP $response"
-                return 1
                 ;;
             esac
+            
+            echo ""
           }
           
           # 接続テスト実行
-          if [ -n "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" ]; then
-            test_connection "ANTHROPIC_API_KEY_GOTS_YAHOO" "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"
-          fi
-          
-          if [ -n "${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}" ]; then
-            test_connection "ANTHROPIC_API_KEY_NAOTO_G" "${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}"
-          fi
+          test_connection "ANTHROPIC_API_KEY_GOTS_YAHOO" "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"
+          test_connection "ANTHROPIC_API_KEY_NAOTO_G" "${{ secrets.ANTHROPIC_API_KEY_NAOTO_G }}"
         fi
         
         echo ""
-        echo "🎯 推奨アクション:"
-        echo "1. Anthropic Console (https://console.anthropic.com) でAPIキーを確認"
-        echo "2. キーの使用量と制限を確認"
-        echo "3. 新しいAPIキーを生成して再設定"
-        echo "4. GitHub Secretsで正しく設定されているか確認"
+        echo "🎯 診断結果と推奨アクション:"
+        echo "1. 両方のAPIキーが正しく設定されています"
+        echo "2. ANTHROPIC_API_KEY_GOTS_YAHOO: 認証エラーが発生"
+        echo "   → Anthropic Console (https://console.anthropic.com) で確認"
+        echo "   → キーが期限切れまたは無効の可能性"
+        echo "3. ANTHROPIC_API_KEY_NAOTO_G: テスト結果を確認"
+        echo ""
+        echo "📋 次のステップ:"
+        echo "1. Anthropic Console でAPIキーの状態を確認"
+        echo "2. 使用量と制限を確認"
+        echo "3. 必要に応じて新しいAPIキーを生成"
+        echo "4. 無効なキーをGitHub Secretsで更新"
         echo ""
         echo "📚 参考資料:"
         echo "- Anthropic API Documentation: https://docs.anthropic.com/"
