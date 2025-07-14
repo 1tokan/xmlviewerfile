@@ -1,606 +1,366 @@
-name: Claude HTML最適化ワークフロー
-
+name: Claude XML Viewer Optimizer
 on:
   schedule:
-    - cron: '*/15 * * * *' # 15分ごと実行
+    - cron: '*/15 * * * *'  # 15分間隔実行
   workflow_dispatch:
-  push:
-    paths:
-      - 'index.html'
-      - '**/*.css'
-      - '**/*.js'
+    inputs:
+      phase:
+        description: '実行フェーズ'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'diagnose'
+          - 'optimize'
+          - 'validate'
+      continue_from:
+        description: '継続ポイント'
+        required: false
+        default: ''
 
 env:
-  OPTIMIZATION_DIR: 'optimized'
-  LOG_FILE: 'optimization.log'
-  MAX_RUNTIME_DAYS: 30
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  TARGET_REPO: '1tokan/xmlviewerfile'
+  SOURCE_URL: 'https://1tokan.github.io/xmlviewerfile'
+  OUTPUT_DIR: 'optimized'
+  MAX_EXECUTION_DAYS: 30
 
 jobs:
-  analyze:
+  claude-optimizer:
     runs-on: ubuntu-latest
-    outputs:
-      needs-optimization: ${{ steps.check.outputs.needs-optimization }}
-      analysis-results: ${{ steps.analyze.outputs.results }}
+    timeout-minutes: 14
+    
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: 実行時間制限チェック
-        id: runtime-check
-        run: |
-          WORKFLOW_START=$(date -d "30 days ago" +%s)
-          CURRENT_TIME=$(date +%s)
-          if [ $CURRENT_TIME -gt $WORKFLOW_START ]; then
-            echo "最大実行期間(30日)に達しました"
-            exit 1
-          fi
-
-      - name: 前回状態の復元
-        id: restore-state
-        run: |
-          if [ -f ".optimization-state" ]; then
-            echo "前回の最適化状態を復元中..."
-            cat .optimization-state
-            echo "state-exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "新規最適化プロセスを開始"
-            echo "state-exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: ファイル変更チェック
-        id: check
-        run: |
-          # 最適化対象ファイルの存在確認
-          if [ ! -f "index.html" ]; then
-            echo "index.html が見つかりません"
-            exit 1
-          fi
-          
-          # 変更検出
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E '\.(html|css|js)$' || true)
-          if [ -n "$CHANGED_FILES" ] || [ "${{ steps.restore-state.outputs.state-exists }}" == "false" ]; then
-            echo "needs-optimization=true" >> $GITHUB_OUTPUT
-            echo "検出された変更: $CHANGED_FILES"
-          else
-            echo "needs-optimization=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: コード診断フェーズ
-        id: analyze
-        if: steps.check.outputs.needs-optimization == 'true'
-        run: |
-          # 診断スクリプトの実行
-          cat > analyze.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-          
-          class CodeAnalyzer {
-            constructor() {
-              this.issues = [];
-              this.metrics = {
-                totalFiles: 0,
-                totalLines: 0,
-                duplicateCode: 0,
-                unusedCode: 0,
-                performanceIssues: 0
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: |
+        npm i -g @anthropic-ai/sdk jsdom prettier
+        cat > package.json << 'EOF'
+        {"type":"module","dependencies":{"@anthropic-ai/sdk":"^0.25.0","jsdom":"^22.1.0","prettier":"^3.0.0"}}
+        EOF
+        npm i
+    
+    - name: Check execution window
+      id: check-window
+      run: |
+        start_date=$(date -d "$(git log --reverse --format="%ai" | head -1)" +%s)
+        current_date=$(date +%s)
+        days_diff=$(( (current_date - start_date) / 86400 ))
+        echo "days_running=$days_diff" >> $GITHUB_OUTPUT
+        echo "should_stop=$([[ $days_diff -gt $MAX_EXECUTION_DAYS ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+    
+    - name: Create optimizer script
+      run: |
+        cat > optimizer.mjs << 'EOF'
+        import Anthropic from '@anthropic-ai/sdk';
+        import { JSDOM } from 'jsdom';
+        import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+        import { dirname, join } from 'path';
+        import { fileURLToPath } from 'url';
+        
+        const __dirname = dirname(fileURLToPath(import.meta.url));
+        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        
+        class ClaudeOptimizer {
+          constructor() {
+            this.baseUrl = process.env.SOURCE_URL;
+            this.outputDir = process.env.OUTPUT_DIR;
+            this.logFile = 'optimization_log.json';
+            this.state = this.loadState();
+            this.maxTokens = 4096;
+          }
+        
+          loadState() {
+            try {
+              return existsSync(this.logFile) ? JSON.parse(readFileSync(this.logFile, 'utf8')) : {
+                phase: 'diagnose',
+                processed: [],
+                issues: [],
+                optimizations: [],
+                iteration: 0,
+                lastRun: null
               };
+            } catch { return { phase: 'diagnose', processed: [], issues: [], optimizations: [], iteration: 0 }; }
+          }
+        
+          saveState() {
+            this.state.lastRun = Date.now();
+            writeFileSync(this.logFile, JSON.stringify(this.state, null, 2));
+          }
+        
+          async fetchContent(url) {
+            try {
+              const response = await fetch(url);
+              return response.ok ? await response.text() : null;
+            } catch { return null; }
+          }
+        
+          async analyzeCode(content, filename) {
+            const prompt = `以下のコードを分析し、最適化が必要な箇所を特定してください：
+        
+        ファイル: ${filename}
+        コード:
+        \`\`\`
+        ${content.slice(0, 8000)}
+        \`\`\`
+        
+        以下のJSON形式で回答してください：
+        {
+          "issues": [
+            {
+              "type": "performance|readability|maintainability|error_handling",
+              "description": "問題の説明",
+              "location": "行数または関数名",
+              "severity": "high|medium|low",
+              "solution": "修正方法"
             }
-            
-            analyzeHTML(content) {
-              const issues = [];
-              
-              // 非効率なDOM操作検出
-              if (content.includes('document.getElementById') && content.match(/getElementById/g).length > 10) {
-                issues.push({
-                  type: 'performance',
-                  file: 'index.html',
-                  line: 'multiple',
-                  description: '過度なgetElementById使用 - セレクタの最適化が必要',
-                  severity: 'medium'
-                });
-              }
-              
-              // インライン記述検出
-              if (content.includes('<script>') && content.includes('</script>')) {
-                issues.push({
-                  type: 'structure',
-                  file: 'index.html',
-                  description: 'インラインスクリプトの外部化が必要',
-                  severity: 'low'
-                });
-              }
-              
-              // 重複スタイル検出
-              const styleMatches = content.match(/<style[^>]*>[\s\S]*?<\/style>/g) || [];
-              if (styleMatches.length > 1) {
-                issues.push({
-                  type: 'duplication',
-                  file: 'index.html',
-                  description: '重複スタイルブロック - 統合が必要',
-                  severity: 'low'
-                });
-              }
-              
-              return issues;
-            }
-            
-            analyzeJS(content, filename) {
-              const issues = [];
-              
-              // 未使用変数検出
-              const varDeclarations = content.match(/(?:var|let|const)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/g) || [];
-              const varUsages = content.match(/[a-zA-Z_$][a-zA-Z0-9_$]*/g) || [];
-              
-              varDeclarations.forEach(decl => {
-                const varName = decl.split(/\s+/)[1];
-                if (varUsages.filter(usage => usage === varName).length <= 1) {
-                  issues.push({
-                    type: 'unused',
-                    file: filename,
-                    description: `未使用変数: ${varName}`,
-                    severity: 'low'
-                  });
-                }
+          ],
+          "metrics": {
+            "codeSize": "文字数",
+            "complexity": "複雑度(1-10)",
+            "duplicateCode": "重複コード数"
+          }
+        }`;
+        
+            try {
+              const response = await anthropic.messages.create({
+                model: 'claude-3-sonnet-20240229',
+                max_tokens: this.maxTokens,
+                messages: [{ role: 'user', content: prompt }]
               });
               
-              // 非効率なループ検出
-              if (content.includes('for (') && content.includes('document.querySelector')) {
-                issues.push({
-                  type: 'performance',
-                  file: filename,
-                  description: 'ループ内DOM操作 - 最適化が必要',
-                  severity: 'high'
-                });
-              }
-              
-              // エラーハンドリング不足
-              if (content.includes('JSON.parse') && !content.includes('try')) {
-                issues.push({
-                  type: 'error-handling',
-                  file: filename,
-                  description: 'JSON.parse にエラーハンドリングが必要',
-                  severity: 'medium'
-                });
-              }
-              
-              return issues;
-            }
-            
-            analyzeCSS(content, filename) {
-              const issues = [];
-              
-              // 重複セレクタ検出
-              const selectors = content.match(/[^{}]+\{[^{}]*\}/g) || [];
-              const selectorCounts = {};
-              
-              selectors.forEach(selector => {
-                const selectorName = selector.split('{')[0].trim();
-                selectorCounts[selectorName] = (selectorCounts[selectorName] || 0) + 1;
-              });
-              
-              Object.entries(selectorCounts).forEach(([selector, count]) => {
-                if (count > 1) {
-                  issues.push({
-                    type: 'duplication',
-                    file: filename,
-                    description: `重複セレクタ: ${selector}`,
-                    severity: 'low'
-                  });
-                }
-              });
-              
-              // 非効率なセレクタ検出
-              if (content.includes('* {') || content.includes('*,')) {
-                issues.push({
-                  type: 'performance',
-                  file: filename,
-                  description: 'ユニバーサルセレクタの使用 - 最適化推奨',
-                  severity: 'medium'
-                });
-              }
-              
-              return issues;
-            }
-            
-            async run() {
-              try {
-                // HTML分析
-                if (fs.existsSync('index.html')) {
-                  const htmlContent = fs.readFileSync('index.html', 'utf8');
-                  this.issues.push(...this.analyzeHTML(htmlContent));
-                  this.metrics.totalFiles++;
-                  this.metrics.totalLines += htmlContent.split('\n').length;
-                }
-                
-                // CSS分析
-                const cssFiles = ['style.css', 'main.css', 'index.css'].filter(f => fs.existsSync(f));
-                for (const cssFile of cssFiles) {
-                  const cssContent = fs.readFileSync(cssFile, 'utf8');
-                  this.issues.push(...this.analyzeCSS(cssContent, cssFile));
-                  this.metrics.totalFiles++;
-                  this.metrics.totalLines += cssContent.split('\n').length;
-                }
-                
-                // JS分析
-                const jsFiles = ['script.js', 'main.js', 'index.js'].filter(f => fs.existsSync(f));
-                for (const jsFile of jsFiles) {
-                  const jsContent = fs.readFileSync(jsFile, 'utf8');
-                  this.issues.push(...this.analyzeJS(jsContent, jsFile));
-                  this.metrics.totalFiles++;
-                  this.metrics.totalLines += jsContent.split('\n').length;
-                }
-                
-                // 分析結果の集計
-                this.metrics.duplicateCode = this.issues.filter(i => i.type === 'duplication').length;
-                this.metrics.unusedCode = this.issues.filter(i => i.type === 'unused').length;
-                this.metrics.performanceIssues = this.issues.filter(i => i.type === 'performance').length;
-                
-                const results = {
-                  timestamp: new Date().toISOString(),
-                  metrics: this.metrics,
-                  issues: this.issues,
-                  needsOptimization: this.issues.length > 0
-                };
-                
-                fs.writeFileSync('analysis-results.json', JSON.stringify(results, null, 2));
-                console.log('分析完了:', JSON.stringify(results, null, 2));
-                
-                return results;
-              } catch (error) {
-                console.error('分析エラー:', error);
-                return { error: error.message };
-              }
+              const result = JSON.parse(response.content[0].text);
+              return result;
+            } catch (error) {
+              console.error('分析エラー:', error);
+              return { issues: [], metrics: { codeSize: content.length, complexity: 5, duplicateCode: 0 } };
             }
           }
-          
-          const analyzer = new CodeAnalyzer();
-          analyzer.run();
-          EOF
-          
-          node analyze.js
-          
-          if [ -f "analysis-results.json" ]; then
-            echo "results<<EOF" >> $GITHUB_OUTPUT
-            cat analysis-results.json >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
-
-  optimize:
-    runs-on: ubuntu-latest
-    needs: analyze
-    if: needs.analyze.outputs.needs-optimization == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: 最適化ディレクトリ準備
-        run: |
-          rm -rf ${{ env.OPTIMIZATION_DIR }}
-          mkdir -p ${{ env.OPTIMIZATION_DIR }}
-          
-          # 最適化状態ファイルの初期化
-          echo "phase=optimization" > .optimization-state
-          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .optimization-state
-
-      - name: 最適化実行
-        run: |
-          cat > optimize.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-          
-          class CodeOptimizer {
-            constructor() {
-              this.optimizationLog = [];
-              this.startTime = Date.now();
-            }
-            
-            log(message, type = 'info') {
-              const entry = {
-                timestamp: new Date().toISOString(),
-                type,
-                message,
-                processingTime: Date.now() - this.startTime
-              };
-              this.optimizationLog.push(entry);
-              console.log(`[${type.toUpperCase()}] ${message}`);
-            }
-            
-            optimizeHTML(content) {
-              this.log('HTML最適化開始');
-              let optimized = content;
-              let changes = 0;
-              
-              // インラインスクリプト/スタイルの外部化
-              const inlineScripts = optimized.match(/<script[^>]*>[\s\S]*?<\/script>/g) || [];
-              inlineScripts.forEach((script, index) => {
-                const scriptContent = script.replace(/<script[^>]*>|<\/script>/g, '');
-                if (scriptContent.trim()) {
-                  fs.writeFileSync(`optimized/inline-script-${index}.js`, scriptContent);
-                  optimized = optimized.replace(script, `<script src="inline-script-${index}.js"></script>`);
-                  changes++;
-                }
+        
+          async optimizeCode(content, issues, filename) {
+            const prompt = `以下のコードを最適化してください：
+        
+        ファイル: ${filename}
+        問題点: ${JSON.stringify(issues)}
+        コード:
+        \`\`\`
+        ${content.slice(0, 6000)}
+        \`\`\`
+        
+        最適化されたコードのみを出力してください。説明は不要です。`;
+        
+            try {
+              const response = await anthropic.messages.create({
+                model: 'claude-3-sonnet-20240229',
+                max_tokens: this.maxTokens,
+                messages: [{ role: 'user', content: prompt }]
               });
               
-              // 重複属性の削除
-              optimized = optimized.replace(/(\s+\w+="[^"]*")\s+\1/g, '$1');
-              
-              // 不要な空白の削除
-              optimized = optimized.replace(/>\s+</g, '><');
-              
-              this.log(`HTML最適化完了 - ${changes}箇所を変更`);
-              return optimized;
-            }
-            
-            optimizeJS(content, filename) {
-              this.log(`JS最適化開始: ${filename}`);
-              let optimized = content;
-              let changes = 0;
-              
-              // 未使用変数の削除
-              const varDeclarations = optimized.match(/(?:var|let|const)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=[^;]*;/g) || [];
-              const varUsages = optimized.match(/[a-zA-Z_$][a-zA-Z0-9_$]*/g) || [];
-              
-              varDeclarations.forEach(decl => {
-                const varName = decl.match(/(?:var|let|const)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/)[1];
-                if (varUsages.filter(usage => usage === varName).length <= 1) {
-                  optimized = optimized.replace(decl, '');
-                  changes++;
-                }
-              });
-              
-              // DOM操作の最適化
-              optimized = optimized.replace(
-                /document\.getElementById\('([^']+)'\)/g,
-                (match, id) => {
-                  // ID参照の最適化（実際の実装では更に詳細な解析が必要）
-                  return match;
-                }
+              return response.content[0].text.replace(/```[\s\S]*?```/g, (match) => 
+                match.replace(/```(?:html|css|javascript|js)?\n?/, '').replace(/\n?```$/, '')
               );
-              
-              // エラーハンドリング追加
-              optimized = optimized.replace(
-                /JSON\.parse\(([^)]+)\)/g,
-                'safeJSONParse($1)'
-              );
-              
-              if (optimized.includes('safeJSONParse')) {
-                const safeParser = `
-function safeJSONParse(str) {
-  try {
-    return JSON.parse(str);
-  } catch (e) {
-    console.error('JSON解析エラー:', e);
-    return null;
-  }
-}`;
-                optimized = safeParser + '\n' + optimized;
-                changes++;
-              }
-              
-              this.log(`JS最適化完了: ${filename} - ${changes}箇所を変更`);
-              return optimized;
-            }
-            
-            optimizeCSS(content, filename) {
-              this.log(`CSS最適化開始: ${filename}`);
-              let optimized = content;
-              let changes = 0;
-              
-              // 重複セレクタの統合
-              const selectors = {};
-              const rules = optimized.match(/[^{}]+\{[^{}]*\}/g) || [];
-              
-              rules.forEach(rule => {
-                const [selector, declarations] = rule.split('{');
-                const selectorKey = selector.trim();
-                const declarationsKey = declarations.replace('}', '').trim();
-                
-                if (selectors[selectorKey]) {
-                  selectors[selectorKey] += '; ' + declarationsKey;
-                } else {
-                  selectors[selectorKey] = declarationsKey;
-                }
-              });
-              
-              // 重複の削除
-              const uniqueRules = Object.entries(selectors).map(([sel, decl]) => 
-                `${sel} { ${decl} }`
-              );
-              
-              if (uniqueRules.length !== rules.length) {
-                optimized = uniqueRules.join('\n');
-                changes = rules.length - uniqueRules.length;
-              }
-              
-              // 不要な空白の削除
-              optimized = optimized.replace(/\s+/g, ' ').replace(/;\s*}/g, '}');
-              
-              this.log(`CSS最適化完了: ${filename} - ${changes}箇所を変更`);
-              return optimized;
-            }
-            
-            async run() {
-              try {
-                this.log('最適化プロセス開始');
-                
-                // HTML最適化
-                if (fs.existsSync('index.html')) {
-                  const htmlContent = fs.readFileSync('index.html', 'utf8');
-                  const optimizedHTML = this.optimizeHTML(htmlContent);
-                  fs.writeFileSync('optimized/index.html', optimizedHTML);
-                }
-                
-                // CSS最適化
-                const cssFiles = ['style.css', 'main.css', 'index.css'].filter(f => fs.existsSync(f));
-                for (const cssFile of cssFiles) {
-                  const cssContent = fs.readFileSync(cssFile, 'utf8');
-                  const optimizedCSS = this.optimizeCSS(cssContent, cssFile);
-                  fs.writeFileSync(`optimized/${cssFile}`, optimizedCSS);
-                }
-                
-                // JS最適化
-                const jsFiles = ['script.js', 'main.js', 'index.js'].filter(f => fs.existsSync(f));
-                for (const jsFile of jsFiles) {
-                  const jsContent = fs.readFileSync(jsFile, 'utf8');
-                  const optimizedJS = this.optimizeJS(jsContent, jsFile);
-                  fs.writeFileSync(`optimized/${jsFile}`, optimizedJS);
-                }
-                
-                // 最適化ログの保存
-                const finalLog = {
-                  timestamp: new Date().toISOString(),
-                  processingTime: Date.now() - this.startTime,
-                  optimizationLog: this.optimizationLog,
-                  summary: {
-                    totalFiles: cssFiles.length + jsFiles.length + 1,
-                    totalChanges: this.optimizationLog.filter(l => l.message.includes('箇所を変更')).length
-                  }
-                };
-                
-                fs.writeFileSync('optimized/optimization-log.json', JSON.stringify(finalLog, null, 2));
-                this.log('最適化完了');
-                
-              } catch (error) {
-                this.log(`最適化エラー: ${error.message}`, 'error');
-                throw error;
-              }
+            } catch (error) {
+              console.error('最適化エラー:', error);
+              return content;
             }
           }
-          
-          const optimizer = new CodeOptimizer();
-          optimizer.run();
-          EOF
-          
-          node optimize.js
-
-      - name: 差分評価
-        run: |
-          cat > validate.js << 'EOF'
-          const fs = require('fs');
-          
-          function validateOptimization() {
-            const results = {
+        
+          async diagnosePhase() {
+            console.log('🔍 診断フェーズ開始');
+            const indexContent = await this.fetchContent(`${this.baseUrl}/index.html`);
+            if (!indexContent) throw new Error('index.html取得失敗');
+        
+            const dom = new JSDOM(indexContent);
+            const doc = dom.window.document;
+            
+            // CSS/JSファイル抽出
+            const cssFiles = Array.from(doc.querySelectorAll('link[rel="stylesheet"]')).map(link => link.href);
+            const jsFiles = Array.from(doc.querySelectorAll('script[src]')).map(script => script.src);
+            
+            const filesToAnalyze = [
+              { name: 'index.html', content: indexContent },
+              ...await Promise.all(cssFiles.map(async url => ({
+                name: url.split('/').pop(),
+                content: await this.fetchContent(url.startsWith('http') ? url : `${this.baseUrl}/${url}`)
+              }))),
+              ...await Promise.all(jsFiles.map(async url => ({
+                name: url.split('/').pop(),
+                content: await this.fetchContent(url.startsWith('http') ? url : `${this.baseUrl}/${url}`)
+              })))
+            ];
+        
+            for (const file of filesToAnalyze.filter(f => f.content)) {
+              if (this.state.processed.includes(file.name)) continue;
+              
+              console.log(`分析中: ${file.name}`);
+              const analysis = await this.analyzeCode(file.content, file.name);
+              
+              this.state.issues.push({
+                file: file.name,
+                content: file.content,
+                analysis
+              });
+              
+              this.state.processed.push(file.name);
+              this.saveState();
+            }
+        
+            this.state.phase = 'optimize';
+            console.log(`✅ 診断完了: ${this.state.issues.length}ファイル分析`);
+          }
+        
+          async optimizePhase() {
+            console.log('⚡ 最適化フェーズ開始');
+            
+            if (!existsSync(this.outputDir)) mkdirSync(this.outputDir, { recursive: true });
+            
+            for (const item of this.state.issues) {
+              if (this.state.optimizations.some(o => o.file === item.file)) continue;
+              
+              const highIssues = item.analysis.issues.filter(i => i.severity === 'high');
+              if (highIssues.length === 0) continue;
+              
+              console.log(`最適化中: ${item.file}`);
+              const optimized = await this.optimizeCode(item.content, highIssues, item.file);
+              
+              const outputPath = join(this.outputDir, item.file);
+              writeFileSync(outputPath, optimized);
+              
+              this.state.optimizations.push({
+                file: item.file,
+                original: item.content.length,
+                optimized: optimized.length,
+                reduction: Math.round((1 - optimized.length / item.content.length) * 100),
+                timestamp: new Date().toISOString()
+              });
+              
+              this.saveState();
+            }
+        
+            this.state.phase = 'validate';
+            console.log(`✅ 最適化完了: ${this.state.optimizations.length}ファイル処理`);
+          }
+        
+          async validatePhase() {
+            console.log('🔍 検証フェーズ開始');
+            
+            const report = {
               timestamp: new Date().toISOString(),
-              validation: {
-                filesGenerated: 0,
-                sizereduction: 0,
-                functionalityPreserved: true,
-                errors: []
-              }
+              totalFiles: this.state.optimizations.length,
+              totalReduction: this.state.optimizations.reduce((sum, o) => sum + o.reduction, 0) / this.state.optimizations.length,
+              issues: this.state.issues.length,
+              optimizations: this.state.optimizations
             };
             
-            // ファイル存在確認
-            const requiredFiles = ['index.html'];
-            requiredFiles.forEach(file => {
-              if (fs.existsSync(`optimized/${file}`)) {
-                results.validation.filesGenerated++;
-              } else {
-                results.validation.errors.push(`Missing file: ${file}`);
-              }
-            });
+            writeFileSync(join(this.outputDir, 'optimization_report.json'), JSON.stringify(report, null, 2));
             
-            // ファイルサイズ比較
-            if (fs.existsSync('index.html') && fs.existsSync('optimized/index.html')) {
-              const originalSize = fs.statSync('index.html').size;
-              const optimizedSize = fs.statSync('optimized/index.html').size;
-              results.validation.sizereduction = ((originalSize - optimizedSize) / originalSize * 100).toFixed(2);
-            }
+            console.log(`📊 最適化レポート:`);
+            console.log(`- 処理ファイル数: ${report.totalFiles}`);
+            console.log(`- 平均削減率: ${report.totalReduction.toFixed(1)}%`);
+            console.log(`- 検出問題数: ${report.issues}`);
             
-            // 基本的な構文チェック
+            this.state.phase = 'complete';
+            this.state.iteration++;
+            this.saveState();
+          }
+        
+          async run(phase = 'all') {
             try {
-              const optimizedHTML = fs.readFileSync('optimized/index.html', 'utf8');
-              if (!optimizedHTML.includes('<!DOCTYPE') && !optimizedHTML.includes('<html')) {
-                results.validation.errors.push('HTML構文エラー');
-                results.validation.functionalityPreserved = false;
+              if (phase === 'all' || phase === 'diagnose') {
+                if (this.state.phase === 'diagnose') await this.diagnosePhase();
               }
-            } catch (e) {
-              results.validation.errors.push(`HTML読み込みエラー: ${e.message}`);
+              
+              if (phase === 'all' || phase === 'optimize') {
+                if (this.state.phase === 'optimize') await this.optimizePhase();
+              }
+              
+              if (phase === 'all' || phase === 'validate') {
+                if (this.state.phase === 'validate') await this.validatePhase();
+              }
+              
+              if (this.state.phase === 'complete') {
+                console.log('🎉 最適化サイクル完了');
+                this.state.phase = 'diagnose';
+                this.state.processed = [];
+                this.saveState();
+              }
+            } catch (error) {
+              console.error('実行エラー:', error);
+              process.exit(1);
             }
-            
-            console.log('検証結果:', JSON.stringify(results, null, 2));
-            fs.writeFileSync('validation-results.json', JSON.stringify(results, null, 2));
-            
-            return results.validation.errors.length === 0;
           }
+        }
+        
+        const optimizer = new ClaudeOptimizer();
+        await optimizer.run(process.argv[2] || 'all');
+        EOF
+    
+    - name: Execute optimization
+      if: steps.check-window.outputs.should_stop == 'false'
+      run: |
+        node optimizer.mjs ${{ github.event.inputs.phase || 'all' }}
+    
+    - name: Commit and push optimizations
+      if: steps.check-window.outputs.should_stop == 'false'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        
+        if ! git diff --cached --quiet; then
+          git commit -m "🚀 Claude最適化 - Iteration ${{ github.run_number }}"
+          git push
+        else
+          echo "変更なし - コミットスキップ"
+        fi
+    
+    - name: Create optimization summary
+      if: steps.check-window.outputs.should_stop == 'false'
+      run: |
+        if [ -f optimization_log.json ]; then
+          echo "## 🎯 最適化サマリー" >> $GITHUB_STEP_SUMMARY
+          echo "- 実行日時: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "- 実行日数: ${{ steps.check-window.outputs.days_running }}日" >> $GITHUB_STEP_SUMMARY
           
-          if (!validateOptimization()) {
-            console.error('最適化検証に失敗しました');
-            process.exit(1);
-          }
-          EOF
-          
-          node validate.js
-
-      - name: 最適化結果のコミット
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          git add ${{ env.OPTIMIZATION_DIR }}
-          git add .optimization-state
-          git add validation-results.json
-          
-          if git diff --staged --quiet; then
-            echo "変更なし - コミットをスキップ"
-          else
-            git commit -m "自動最適化: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            git push
+          if [ -f optimized/optimization_report.json ]; then
+            echo "- 最適化ファイル数: $(jq '.totalFiles' optimized/optimization_report.json)" >> $GITHUB_STEP_SUMMARY
+            echo "- 平均削減率: $(jq '.totalReduction' optimized/optimization_report.json)%" >> $GITHUB_STEP_SUMMARY
           fi
-
-      - name: 最適化状態の更新
-        run: |
-          echo "phase=completed" >> .optimization-state
-          echo "completion_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .optimization-state
           
-          # 次回実行のための状態保存
-          if [ -f "validation-results.json" ]; then
-            echo "last_validation_result=success" >> .optimization-state
-          else
-            echo "last_validation_result=failed" >> .optimization-state
-          fi
-
-      - name: 最適化レポート生成
-        run: |
-          cat > ${{ env.OPTIMIZATION_DIR }}/optimization-report.md << 'EOF'
-          # 最適化レポート
+          echo "- 処理フェーズ: $(jq -r '.phase' optimization_log.json)" >> $GITHUB_STEP_SUMMARY
+          echo "- 反復回数: $(jq '.iteration' optimization_log.json)" >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name: Stop execution after 30 days
+      if: steps.check-window.outputs.should_stop == 'true'
+      run: |
+        echo "⏰ 30日間の実行期間が終了しました"
+        echo "最終レポートを生成します"
+        
+        if [ -f optimized/optimization_report.json ]; then
+          echo "## 📊 最終最適化レポート" >> $GITHUB_STEP_SUMMARY
+          echo "- 総実行期間: ${{ steps.check-window.outputs.days_running }}日" >> $GITHUB_STEP_SUMMARY
+          echo "- 最適化完了ファイル数: $(jq '.totalFiles' optimized/optimization_report.json)" >> $GITHUB_STEP_SUMMARY
+          echo "- 平均コード削減率: $(jq '.totalReduction' optimized/optimization_report.json)%" >> $GITHUB_STEP_SUMMARY
           
-          ## 実行情報
-          - 実行日時: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          - ワークフロー: Claude HTML最適化
-          - 対象: index.html および関連ファイル
-          
-          ## 最適化結果
-          詳細な最適化ログは `optimization-log.json` を参照してください。
-          
-          ## 検証結果
-          検証結果は `validation-results.json` に記録されています。
-          
-          ## 次回実行
-          このワークフローは15分ごとに実行され、変更があった場合に自動的に最適化を実行します。
-          EOF
-
-  cleanup:
-    runs-on: ubuntu-latest
-    needs: [analyze, optimize]
-    if: always()
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: 古いログファイルの削除
-        run: |
-          # 7日以上古いログファイルを削除
-          find ${{ env.OPTIMIZATION_DIR }} -name "*.log" -mtime +7 -delete || true
-          find ${{ env.OPTIMIZATION_DIR }} -name "optimization-log-*.json" -mtime +7 -delete || true
-          
-          # 最適化状態の定期リセット（30日ごと）
-          if [ -f ".optimization-state" ]; then
-            LAST_RESET=$(grep "last_reset=" .optimization-state | cut -d'=' -f2 || echo "0")
-            CURRENT_TIME=$(date +%s)
-            RESET_INTERVAL=$((30 * 24 * 60 * 60)) # 30日
-            
-            if [ $((CURRENT_TIME - LAST_RESET)) -gt $RESET_INTERVAL ]; then
-              echo "最適化状態をリセット"
-              rm -f .optimization-state
-              echo "last_reset=$CURRENT_TIME" > .optimization-state
-            fi
-          fi
+          # 最適化されたファイルのリストを表示
+          echo "### 最適化されたファイル:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.optimizations[] | "- \(.file): \(.reduction)% 削減"' optimized/optimization_report.json >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # ワークフロー自動停止
+        gh workflow disable "Claude XML Viewer Optimizer" --repo ${{ github.repository }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
