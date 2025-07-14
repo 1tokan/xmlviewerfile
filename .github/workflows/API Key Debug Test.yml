@@ -33,17 +33,6 @@ jobs:
         # シークレットの存在確認
         echo "🔑 シークレット存在確認:"
         
-        # ANTHROPIC_API_KEY (旧)
-        if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
-          echo "✅ ANTHROPIC_API_KEY: 存在"
-          key_len=${#{{ secrets.ANTHROPIC_API_KEY }}}
-          echo "   📏 長さ: $key_len文字"
-          echo "   🔤 開始: ${{ secrets.ANTHROPIC_API_KEY }}" | head -c 15
-          echo "..."
-        else
-          echo "❌ ANTHROPIC_API_KEY: 未設定"
-        fi
-        
         # ANTHROPIC_API_KEY_GOTS_YAHOO
         if [ -n "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" ]; then
           echo "✅ ANTHROPIC_API_KEY_GOTS_YAHOO: 存在"
@@ -113,10 +102,6 @@ jobs:
           }
           
           # 各キーをチェック
-          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
-            check_key_format "ANTHROPIC_API_KEY" "${{ secrets.ANTHROPIC_API_KEY }}"
-          fi
-          
           if [ -n "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" ]; then
             check_key_format "ANTHROPIC_API_KEY_GOTS_YAHOO" "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"
           fi
@@ -190,10 +175,6 @@ jobs:
           }
           
           # 接続テスト実行
-          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
-            test_connection "ANTHROPIC_API_KEY" "${{ secrets.ANTHROPIC_API_KEY }}"
-          fi
-          
           if [ -n "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" ]; then
             test_connection "ANTHROPIC_API_KEY_GOTS_YAHOO" "${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}"
           fi
