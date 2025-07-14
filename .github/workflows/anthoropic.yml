@@ -10,7 +10,7 @@ jobs:
       - name: Run Claude API request via curl
         run: |
           curl -X POST "https://api.anthropic.com/v1/messages" \
-            -H "Authorization: Bearer ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.ANTHROPIC_API_KEY_GOTS_YAHOO }}" \
             -H "Content-Type: application/json" \
             -H "anthropic-version: 2023-06-01" \
             -d '{
