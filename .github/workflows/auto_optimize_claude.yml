@@ -1,22 +1,19 @@
-# GitHub Actions自動最適化ワークフロー - Claude連携版
 name: Auto Optimize with Claude
-
 on:
   schedule:
     - cron: '*/15 * * * *'  # 15分ごと実行
   workflow_dispatch:
   push:
-    paths: ['index.html', '**/*.css', '**/*.js']
+    paths: ['index.html', '*.css', '*.js']
 
 env:
-  CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-  MAX_ITERATIONS: 2880  # 30日間の最大実行回数(30*24*4)
-  OPTIMIZATION_STATE_FILE: '.optimization_state.json'
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  MAX_EXECUTION_DAYS: 30
 
 jobs:
   optimize:
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 10
     
     steps:
     - name: Checkout repository
@@ -24,465 +21,399 @@ jobs:
       with:
         fetch-depth: 0
         token: ${{ secrets.GITHUB_TOKEN }}
-
+    
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '20'
-
+    
+    - name: Check execution time limit
+      id: time_check
+      run: |
+        START_TIME=$(git log --format=%ct -n 1 -- .github/workflows/auto_optimize_claude.yml 2>/dev/null || echo $(date +%s))
+        CURRENT_TIME=$(date +%s)
+        ELAPSED_DAYS=$(( (CURRENT_TIME - START_TIME) / 86400 ))
+        
+        if [ $ELAPSED_DAYS -gt $MAX_EXECUTION_DAYS ]; then
+          echo "execution_expired=true" >> $GITHUB_OUTPUT
+          echo "⏰ 最大実行期間($MAX_EXECUTION_DAYS日)を超過しました"
+          exit 1
+        fi
+        echo "elapsed_days=$ELAPSED_DAYS" >> $GITHUB_OUTPUT
+    
     - name: Install dependencies
       run: |
         npm init -y
-        npm install axios fs-extra cheerio uglify-js clean-css
-
-    - name: Load optimization state
-      id: load_state
-      run: |
-        if [ -f "$OPTIMIZATION_STATE_FILE" ]; then
-          echo "STATE_EXISTS=true" >> $GITHUB_OUTPUT
-          echo "CURRENT_ITERATION=$(jq -r '.iteration // 0' $OPTIMIZATION_STATE_FILE)" >> $GITHUB_OUTPUT
-          echo "LAST_PHASE=$(jq -r '.phase // "diagnosis"' $OPTIMIZATION_STATE_FILE)" >> $GITHUB_OUTPUT
-        else
-          echo "STATE_EXISTS=false" >> $GITHUB_OUTPUT
-          echo "CURRENT_ITERATION=0" >> $GITHUB_OUTPUT
-          echo "LAST_PHASE=diagnosis" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Check iteration limit
-      run: |
-        if [ ${{ steps.load_state.outputs.CURRENT_ITERATION }} -ge $MAX_ITERATIONS ]; then
-          echo "最大実行回数に達しました。ワークフローを終了します。"
-          exit 0
-        fi
-
+        npm install axios cheerio fs-extra
+    
     - name: Create optimization script
       run: |
         cat > optimize.js << 'EOF'
         const axios = require('axios');
+        const cheerio = require('cheerio');
         const fs = require('fs-extra');
         const path = require('path');
-        const cheerio = require('cheerio');
-        const UglifyJS = require('uglify-js');
-        const CleanCSS = require('clean-css');
-
+        
         class ClaudeOptimizer {
           constructor() {
-            this.apiKey = process.env.CLAUDE_API_KEY;
-            this.stateFile = process.env.OPTIMIZATION_STATE_FILE;
+            this.apiKey = process.env.ANTHROPIC_API_KEY;
             this.baseUrl = 'https://api.anthropic.com/v1/messages';
-            this.optimizedDir = 'optimized';
-            this.logFile = 'optimization_log.md';
-            this.state = this.loadState();
+            this.optimizationLog = [];
+            this.processedFiles = new Set();
+            this.targetDir = 'optimized';
+            this.maxRetries = 3;
           }
-
-          loadState() {
-            try {
-              if (fs.existsSync(this.stateFile)) {
-                return JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
-              }
-            } catch (e) {
-              console.log('状態ファイル読み込みエラー:', e.message);
-            }
-            return {
-              iteration: 0,
-              phase: 'diagnosis',
-              processedFiles: {},
-              optimizationTargets: [],
-              lastResults: null
-            };
-          }
-
-          saveState() {
-            try {
-              fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
-            } catch (e) {
-              console.error('状態保存エラー:', e.message);
-            }
-          }
-
-          async callClaude(prompt) {
-            if (!this.apiKey) {
-              throw new Error('CLAUDE_API_KEY が設定されていません');
-            }
+        
+          async callClaude(prompt, context = '') {
+            const fullPrompt = `${context}\n\n${prompt}`;
             
-            try {
-              const response = await axios.post(this.baseUrl, {
-                model: 'claude-3-5-sonnet-20241022',
-                max_tokens: 4000,
-                messages: [{
-                  role: 'user',
-                  content: prompt
-                }]
-              }, {
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': this.apiKey,
-                  'anthropic-version': '2023-06-01'
-                },
-                timeout: 30000
-              });
-              
-              if (response.data && response.data.content && response.data.content[0]) {
+            for (let i = 0; i < this.maxRetries; i++) {
+              try {
+                const response = await axios.post(this.baseUrl, {
+                  model: 'claude-3-5-sonnet-20241022',
+                  max_tokens: 8000,
+                  temperature: 0.1,
+                  system: `あなたは高度なWebパフォーマンス最適化専門家です。HTML/CSS/JavaScriptコードを分析し、具体的な問題点を特定して最適化を行います。処理速度・仕様完全網羅・文字数最小化を重視し、段階的な最適化を実施してください。`,
+                  messages: [{ role: 'user', content: fullPrompt }]
+                }, {
+                  headers: {
+                    'Authorization': `Bearer ${this.apiKey}`,
+                    'Content-Type': 'application/json',
+                    'anthropic-version': '2023-06-01'
+                  },
+                  timeout: 30000
+                });
+                
                 return response.data.content[0].text;
+              } catch (error) {
+                console.log(`Claude API呼び出し失敗 (試行 ${i + 1}/${this.maxRetries}):`, error.message);
+                if (i === this.maxRetries - 1) throw error;
+                await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
               }
-              throw new Error('Claude API レスポンス形式が無効です');
+            }
+          }
+        
+          async analyzeCode(filePath) {
+            const startTime = Date.now();
+            const content = await fs.readFile(filePath, 'utf8');
+            const fileType = path.extname(filePath);
+            
+            console.log(`📋 分析開始: ${filePath}`);
+            
+            const analysisPrompt = `
+        ## コード診断フェーズ
+        以下の${fileType}ファイルを分析し、問題点を特定してください：
+        
+        **ファイル名:** ${filePath}
+        **内容:**
+        \`\`\`${fileType.slice(1)}
+        ${content}
+        \`\`\`
+        
+        **分析観点:**
+        1. 不適切・非効率な記述
+        2. 重複・未使用コード
+        3. UX/UIや処理速度に悪影響を与える記述
+        4. 可読性・保守性の低い構成
+        5. 設計原則に反する点
+        
+        **出力形式:**
+        - 問題箇所: [行数] 具体的な問題点
+        - 修正理由: なぜ修正が必要か
+        - 最適化対象: true/false
+        - 改善案: 具体的な修正方法
+        
+        問題のない部分は触らないこと。
+        `;
+            
+            const analysis = await this.callClaude(analysisPrompt);
+            const processingTime = Date.now() - startTime;
+            
+            this.optimizationLog.push({
+              phase: 'analysis',
+              file: filePath,
+              processingTime,
+              result: analysis,
+              timestamp: new Date().toISOString()
+            });
+            
+            return analysis;
+          }
+        
+          async optimizeCode(filePath, analysisResult) {
+            const startTime = Date.now();
+            const content = await fs.readFile(filePath, 'utf8');
+            const fileType = path.extname(filePath);
+            
+            console.log(`⚡ 最適化開始: ${filePath}`);
+            
+            const optimizationPrompt = `
+        ## 最適化フェーズ
+        
+        **分析結果:**
+        ${analysisResult}
+        
+        **元のコード:**
+        \`\`\`${fileType.slice(1)}
+        ${content}
+        \`\`\`
+        
+        **最適化要件:**
+        - 処理速度: DOM操作・再描画の抑制、ループやセレクタの見直し
+        - コード簡素化: 冗長なロジック・未使用変数の削除
+        - エラーハンドリング: try-catch導入、構文・文字コードエラー対処
+        - 保守性: 命名統一・責務分離・コメント最適化
+        
+        **出力形式:**
+        - 最適化されたコード全文
+        - 変更点の詳細説明
+        - コード短縮率
+        - 処理速度改善見込み
+        
+        分析で問題なしとされた部分は変更しないこと。
+        `;
+            
+            const optimizedResult = await this.callClaude(optimizationPrompt);
+            const processingTime = Date.now() - startTime;
+            
+            this.optimizationLog.push({
+              phase: 'optimization',
+              file: filePath,
+              processingTime,
+              result: optimizedResult,
+              timestamp: new Date().toISOString()
+            });
+            
+            return optimizedResult;
+          }
+        
+          async extractOptimizedCode(optimizedResult) {
+            const codeBlocks = optimizedResult.match(/```[\s\S]*?```/g);
+            if (!codeBlocks) return null;
+            
+            // 最初のコードブロックを抽出
+            const code = codeBlocks[0].replace(/```[\w]*\n/, '').replace(/```$/, '');
+            return code.trim();
+          }
+        
+          async splitLargeFiles(content, baseName) {
+            const maxSize = 50000; // 50KB制限
+            if (content.length <= maxSize) return [{ name: baseName, content }];
+            
+            const parts = [];
+            const chunks = Math.ceil(content.length / maxSize);
+            
+            for (let i = 0; i < chunks; i++) {
+              const start = i * maxSize;
+              const end = Math.min(start + maxSize, content.length);
+              const chunk = content.slice(start, end);
+              
+              parts.push({
+                name: `${baseName}_part${i + 1}`,
+                content: `/* Claude最適化 - Part ${i + 1}/${chunks} */\n${chunk}`
+              });
+            }
+            
+            return parts;
+          }
+        
+          async validateOptimization(originalPath, optimizedPath) {
+            console.log(`🔍 検証開始: ${originalPath} vs ${optimizedPath}`);
+            
+            const validationPrompt = `
+        ## 差分評価と検証
+        
+        元のファイルと最適化後のファイルを比較し、以下を評価してください：
+        
+        **評価観点:**
+        1. UI/UX: 表示・操作に変化がないか
+        2. 表示速度: パフォーマンス改善度
+        3. 安定性: エラー発生リスクの変化
+        4. 機能再現性: 元の機能が正しく動作するか
+        
+        **判定:**
+        - 合格: 最適化成功
+        - 不合格: 問題あり（理由を明記）
+        
+        不合格の場合は修正案を提示してください。
+        `;
+            
+            const validation = await this.callClaude(validationPrompt);
+            
+            this.optimizationLog.push({
+              phase: 'validation',
+              originalFile: originalPath,
+              optimizedFile: optimizedPath,
+              result: validation,
+              timestamp: new Date().toISOString()
+            });
+            
+            return validation.includes('合格') || validation.includes('成功');
+          }
+        
+          async processFile(filePath) {
+            if (this.processedFiles.has(filePath)) {
+              console.log(`⏭️  スキップ済み: ${filePath}`);
+              return;
+            }
+            
+            try {
+              // ステップ1: 診断
+              const analysis = await this.analyzeCode(filePath);
+              
+              // 最適化不要と判定された場合はスキップ
+              if (analysis.includes('最適化対象: false') || analysis.includes('問題なし')) {
+                console.log(`✅ 最適化不要: ${filePath}`);
+                this.processedFiles.add(filePath);
+                return;
+              }
+              
+              // ステップ2: 最適化
+              const optimizedResult = await this.optimizeCode(filePath, analysis);
+              const optimizedCode = await this.extractOptimizedCode(optimizedResult);
+              
+              if (!optimizedCode) {
+                console.log(`❌ 最適化失敗: ${filePath}`);
+                return;
+              }
+              
+              // ステップ3: ファイル分割（必要に応じて）
+              const baseName = path.basename(filePath, path.extname(filePath));
+              const parts = await this.splitLargeFiles(optimizedCode, baseName);
+              
+              // ステップ4: 保存
+              await fs.ensureDir(this.targetDir);
+              const optimizedPath = path.join(this.targetDir, path.basename(filePath));
+              
+              if (parts.length === 1) {
+                await fs.writeFile(optimizedPath, parts[0].content);
+              } else {
+                // 複数パートに分割
+                for (const part of parts) {
+                  const partPath = path.join(this.targetDir, `${part.name}${path.extname(filePath)}`);
+                  await fs.writeFile(partPath, part.content);
+                }
+              }
+              
+              // ステップ5: 検証
+              const isValid = await this.validateOptimization(filePath, optimizedPath);
+              
+              if (isValid) {
+                console.log(`✅ 最適化完了: ${filePath}`);
+                this.processedFiles.add(filePath);
+              } else {
+                console.log(`❌ 検証失敗: ${filePath}`);
+                await fs.remove(optimizedPath);
+              }
+              
             } catch (error) {
-              console.error('Claude API エラー:', error.response?.data || error.message);
-              throw new Error(`Claude API呼び出し失敗: ${error.message}`);
-            }
-          }
-
-          async readSourceFiles() {
-            const files = {};
-            const htmlPath = 'index.html';
-            
-            if (fs.existsSync(htmlPath)) {
-              files.html = fs.readFileSync(htmlPath, 'utf8');
-              
-              const $ = cheerio.load(files.html);
-              
-              // CSS files
-              $('link[rel="stylesheet"]').each((i, elem) => {
-                const href = $(elem).attr('href');
-                if (href && !href.startsWith('http') && fs.existsSync(href)) {
-                  files[href] = fs.readFileSync(href, 'utf8');
-                }
-              });
-              
-              // JS files
-              $('script[src]').each((i, elem) => {
-                const src = $(elem).attr('src');
-                if (src && !src.startsWith('http') && fs.existsSync(src)) {
-                  files[src] = fs.readFileSync(src, 'utf8');
-                }
-              });
-              
-              // Inline CSS/JS
-              $('style').each((i, elem) => {
-                files[`inline_style_${i}`] = $(elem).html();
-              });
-              
-              $('script:not([src])').each((i, elem) => {
-                const content = $(elem).html();
-                if (content.trim()) {
-                  files[`inline_script_${i}`] = content;
-                }
+              console.error(`❌ 処理エラー: ${filePath}`, error.message);
+              this.optimizationLog.push({
+                phase: 'error',
+                file: filePath,
+                error: error.message,
+                timestamp: new Date().toISOString()
               });
             }
-            
-            return files;
           }
-
-          async diagnosisPhase(files) {
-            if (Object.keys(files).length === 0) {
-              console.log('対象ファイルが見つかりません');
-              return { issues: [] };
-            }
+        
+          async run() {
+            console.log('🚀 Claude最適化システム開始');
             
-            const prompt = `
-            【コード診断フェーズ】
-            以下のHTML/CSS/JavaScriptファイルを分析し、最適化が必要な箇所を特定してください：
-
-            ${Object.entries(files).map(([name, content]) => 
-              `=== ${name} ===\n${content.substring(0, 1500)}${content.length > 1500 ? '...(省略)' : ''}`
-            ).join('\n\n')}
-
-            以下の観点で問題点を特定し、必ずJSON形式で返してください：
-            {
-              "issues": [
-                {
-                  "file": "ファイル名",
-                  "type": "performance",
-                  "location": "行番号または関数名",
-                  "description": "問題の説明",
-                  "priority": "high",
-                  "reason": "修正が必要な理由"
-                }
-              ]
-            }
-
-            分析観点：
-            - 処理速度：DOM操作、ループ、セレクタの非効率性
-            - 冗長性：重複コード、未使用変数・関数
-            - 保守性：命名規則、責務分離、コメント不足
-            - エラー処理：try-catch不足、XMLパースエラー対応
-            `;
-
-            try {
-              const response = await this.callClaude(prompt);
-              const jsonMatch = response.match(/\{[\s\S]*\}/);
-              if (jsonMatch) {
-                const diagnosis = JSON.parse(jsonMatch[0]);
-                this.state.optimizationTargets = diagnosis.issues || [];
-                return diagnosis;
-              }
-              throw new Error('JSON形式のレスポンスが見つかりません');
-            } catch (e) {
-              console.error('診断結果パースエラー:', e.message);
-              console.log('レスポンス:', response);
-              return { issues: [] };
-            }
-          }
-
-          async optimizationPhase(files) {
-            if (this.state.optimizationTargets.length === 0) {
-              console.log('最適化対象がありません');
-              return { optimizedFiles: files, changes: [] };
-            }
-
-            const target = this.state.optimizationTargets[0];
-            const targetFile = files[target.file];
+            // 対象ファイルの検出
+            const targetFiles = ['index.html'];
+            const cssFiles = await fs.readdir('.').then(files => files.filter(f => f.endsWith('.css')));
+            const jsFiles = await fs.readdir('.').then(files => files.filter(f => f.endsWith('.js')));
             
-            if (!targetFile) {
-              console.log(`対象ファイル ${target.file} が見つかりません`);
-              this.state.optimizationTargets.shift();
-              return { optimizedFiles: files, changes: [] };
-            }
-
-            const prompt = `
-            【最適化フェーズ】
-            以下の特定問題を修正してください：
-
-            問題: ${target.description}
-            ファイル: ${target.file}
-            場所: ${target.location}
-            理由: ${target.reason}
-
-            元のコード：
-            ${targetFile.substring(0, 2000)}${targetFile.length > 2000 ? '...(省略)' : ''}
-
-            修正後のコードを以下の形式で返してください：
-            {
-              "optimizedCode": "修正後のコード全体",
-              "changes": "実施した変更の説明",
-              "processingTime": "100",
-              "codeReductionRate": "5"
-            }
-
-            最適化指針：
-            - 処理速度向上：DOM操作最小化、効率的なセレクタ使用
-            - コード簡素化：冗長削除、テンプレート効率化
-            - 機能分割：責務に応じたファイル分割
-            - エラーハンドリング：XMLパースエラー対応強化
-            `;
-
-            try {
-              const response = await this.callClaude(prompt);
-              const jsonMatch = response.match(/\{[\s\S]*\}/);
-              if (jsonMatch) {
-                const optimization = JSON.parse(jsonMatch[0]);
-                if (optimization.optimizedCode) {
-                  files[target.file] = optimization.optimizedCode;
-                  this.state.optimizationTargets.shift();
-                  return {
-                    optimizedFiles: files,
-                    changes: [{
-                      file: target.file,
-                      description: optimization.changes || '最適化完了',
-                      processingTime: optimization.processingTime || '不明',
-                      codeReductionRate: optimization.codeReductionRate || '不明'
-                    }]
-                  };
-                }
+            targetFiles.push(...cssFiles, ...jsFiles);
+            
+            console.log(`📁 対象ファイル: ${targetFiles.join(', ')}`);
+            
+            // 各ファイルを順次処理
+            for (const file of targetFiles) {
+              if (await fs.pathExists(file)) {
+                await this.processFile(file);
               }
-              throw new Error('最適化結果の取得に失敗');
-            } catch (e) {
-              console.error('最適化結果パースエラー:', e.message);
-              this.state.optimizationTargets.shift(); // 失敗したタスクをスキップ
             }
             
-            return { optimizedFiles: files, changes: [] };
+            // ログ出力
+            await this.generateReport();
+            
+            console.log('🎉 最適化処理完了');
           }
-
-          async rebuildPhase(files) {
-            try {
-              await fs.ensureDir(this.optimizedDir);
-              
-              // HTML再構築
-              if (files.html) {
-                const $ = cheerio.load(files.html);
-                
-                // インラインスタイルの外部化
-                $('style').each((i, elem) => {
-                  const inlineKey = `inline_style_${i}`;
-                  if (files[inlineKey]) {
-                    const fileName = `style_${i}.css`;
-                    try {
-                      const optimizedCSS = new CleanCSS().minify(files[inlineKey]).styles;
-                      fs.writeFileSync(path.join(this.optimizedDir, fileName), optimizedCSS);
-                      $(elem).replaceWith(`<link rel="stylesheet" href="${fileName}">`);
-                    } catch (e) {
-                      console.error(`CSS最適化エラー ${fileName}:`, e.message);
-                      fs.writeFileSync(path.join(this.optimizedDir, fileName), files[inlineKey]);
-                    }
-                  }
-                });
-                
-                // インラインスクリプトの外部化
-                $('script:not([src])').each((i, elem) => {
-                  const inlineKey = `inline_script_${i}`;
-                  if (files[inlineKey]) {
-                    const fileName = `script_${i}.js`;
-                    try {
-                      const minified = UglifyJS.minify(files[inlineKey]);
-                      fs.writeFileSync(path.join(this.optimizedDir, fileName), 
-                        minified.error ? files[inlineKey] : minified.code);
-                      $(elem).replaceWith(`<script src="${fileName}"></script>`);
-                    } catch (e) {
-                      console.error(`JS最適化エラー ${fileName}:`, e.message);
-                      fs.writeFileSync(path.join(this.optimizedDir, fileName), files[inlineKey]);
-                    }
-                  }
-                });
-                
-                fs.writeFileSync(path.join(this.optimizedDir, 'index.html'), $.html());
+        
+          async generateReport() {
+            const report = {
+              timestamp: new Date().toISOString(),
+              totalFiles: this.processedFiles.size,
+              processedFiles: Array.from(this.processedFiles),
+              optimizationLog: this.optimizationLog,
+              summary: {
+                totalProcessingTime: this.optimizationLog.reduce((sum, log) => sum + (log.processingTime || 0), 0),
+                successCount: this.optimizationLog.filter(log => log.phase === 'validation' && log.result.includes('合格')).length,
+                errorCount: this.optimizationLog.filter(log => log.phase === 'error').length
               }
-              
-              // 外部ファイル処理
-              for (const [fileName, content] of Object.entries(files)) {
-                if (fileName === 'html' || fileName.startsWith('inline_')) continue;
-                
-                const outputPath = path.join(this.optimizedDir, fileName);
-                await fs.ensureDir(path.dirname(outputPath));
-                
-                try {
-                  if (fileName.endsWith('.css')) {
-                    const optimized = new CleanCSS().minify(content);
-                    fs.writeFileSync(outputPath, optimized.styles);
-                  } else if (fileName.endsWith('.js')) {
-                    const minified = UglifyJS.minify(content);
-                    fs.writeFileSync(outputPath, minified.error ? content : minified.code);
-                  } else {
-                    fs.writeFileSync(outputPath, content);
-                  }
-                } catch (e) {
-                  console.error(`ファイル処理エラー ${fileName}:`, e.message);
-                  fs.writeFileSync(outputPath, content);
-                }
-              }
-              
-              console.log('ファイル再構築完了');
-            } catch (error) {
-              console.error('再構築エラー:', error.message);
-              throw error;
-            }
-          }
-
-          async evaluationPhase() {
-            // 簡略化された評価フェーズ
-            const evaluation = {
-              evaluation: {
-                ui_ux: "good",
-                performance: "improved", 
-                stability: "good",
-                functionality: "working"
-              },
-              issues: [],
-              rollbackRequired: false,
-              recommendations: ["継続的な最適化を推奨"]
             };
             
-            console.log('評価フェーズ完了');
-            return evaluation;
-          }
-
-          async logResults(phase, results) {
-            const timestamp = new Date().toISOString();
-            const logEntry = `
-## ${timestamp} - ${phase.toUpperCase()}フェーズ (実行回数: ${this.state.iteration})
-
-\`\`\`json
-${JSON.stringify(results, null, 2)}
-\`\`\`
-
----
-`;
-            
-            try {
-              await fs.appendFile(this.logFile, logEntry);
-            } catch (e) {
-              console.error('ログ書き込みエラー:', e.message);
-            }
-          }
-
-          async run() {
-            const startTime = Date.now();
-            
-            try {
-              console.log(`実行開始 - 反復回数: ${this.state.iteration}, フェーズ: ${this.state.phase}`);
-              
-              const files = await this.readSourceFiles();
-              let results = {};
-              
-              switch (this.state.phase) {
-                case 'diagnosis':
-                  results = await this.diagnosisPhase(files);
-                  this.state.phase = 'optimization';
-                  break;
-                  
-                case 'optimization':
-                  results = await this.optimizationPhase(files);
-                  if (this.state.optimizationTargets.length === 0) {
-                    this.state.phase = 'rebuild';
-                  }
-                  break;
-                  
-                case 'rebuild':
-                  await this.rebuildPhase(files);
-                  this.state.phase = 'evaluation';
-                  results = { message: 'ファイル再構築完了' };
-                  break;
-                  
-                case 'evaluation':
-                  results = await this.evaluationPhase();
-                  if (results.rollbackRequired) {
-                    console.log('品質低下により最適化をロールバックします');
-                    await fs.remove(this.optimizedDir);
-                  }
-                  this.state.phase = 'diagnosis';
-                  break;
-              }
-              
-              this.state.iteration++;
-              this.state.lastResults = results;
-              await this.logResults(this.state.phase, results);
-              
-              console.log(`フェーズ ${this.state.phase} 完了 - 処理時間: ${Date.now() - startTime}ms`);
-              
-            } catch (error) {
-              console.error('最適化プロセスエラー:', error.message);
-              await this.logResults('error', { error: error.message });
-            } finally {
-              this.saveState();
-            }
+            await fs.writeFile('optimization_report.json', JSON.stringify(report, null, 2));
+            console.log('📊 レポート生成完了: optimization_report.json');
           }
         }
-
+        
         // 実行
-        const optimizer = new ClaudeOptimizer();
-        optimizer.run().catch(console.error);
+        async function main() {
+          const optimizer = new ClaudeOptimizer();
+          await optimizer.run();
+        }
+        
+        main().catch(console.error);
         EOF
-
-    - name: Execute optimization
-      run: node optimize.js
-
+    
+    - name: Run optimization
+      run: |
+        node optimize.js
+        echo "🔄 最適化実行完了"
+    
     - name: Commit optimized files
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add .
-        if git diff --staged --quiet; then
-          echo "変更なし"
-        else
-          git commit -m "Auto-optimize: iteration ${{ steps.load_state.outputs.CURRENT_ITERATION }} [skip ci]"
+        
+        # optimizedディレクトリが存在し、変更がある場合のみコミット
+        if [ -d "optimized" ] && [ -n "$(git status --porcelain optimized/)" ]; then
+          git add optimized/
+          git add optimization_report.json
+          
+          # コミットメッセージに最適化情報を含める
+          OPTIMIZED_COUNT=$(find optimized/ -type f | wc -l)
+          git commit -m "🚀 Claude最適化実行: ${OPTIMIZED_COUNT}ファイル処理完了
+          
+          - 処理時間: $(date '+%Y-%m-%d %H:%M:%S')
+          - 最適化ファイル: ${OPTIMIZED_COUNT}個
+          - 詳細: optimization_report.json参照
+          
+          [skip ci]"
+          
           git push
+          echo "✅ 最適化結果をプッシュしました"
+        else
+          echo "ℹ️ 最適化対象なし、または変更なし"
         fi
-
-    - name: Upload optimization log
-      uses: actions/upload-artifact@v4
-      with:
-        name: optimization-log-${{ github.run_number }}
-        path: |
-          optimization_log.md
-          .optimization_state.json
-        retention-days: 30
+    
+    - name: Check optimization status
+      run: |
+        if [ -f "optimization_report.json" ]; then
+          echo "📋 最適化レポート概要:"
+          cat optimization_report.json | jq '.summary'
+        fi
+        
+        echo "📁 最適化ファイル一覧:"
+        find optimized/ -type f 2>/dev/null | head -20 || echo "最適化ファイルなし"
+    
+    - name: Cleanup old optimizations
+      run: |
+        # 7日以上前の最適化ファイルを削除
+        find optimized/ -type f -mtime +7 -delete 2>/dev/null || true
+        
+        # 空のディレクトリを削除
+        find optimized/ -type d -empty -delete 2>/dev/null || true
